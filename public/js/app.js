@@ -18,6 +18,13 @@ const state = {
   searchCtl: null,
   stopType: null,
   ask: { busy: false, out: null },
+  // AI 判斷：名稱比對太弱時自動送，否則下拉最後一列可以手動送
+  ai: { q: '', status: 'idle', results: [], error: '' }, // status: idle | wait | loading | done | error
+  aiCtl: null,
+  aiTimer: null,
+  options: [], // 下拉裡可選的列：{ kind: 'pokemon', r, from: 'name' | 'ai' } | { kind: 'ai' }
+  listQ: '', // 下拉目前顯示的是哪個查詢字的結果
+  composing: false,
 };
 
 const EGG_ZH = {
@@ -43,9 +50,13 @@ async function loadStatus() {
     const p = st.pokeapi;
     setLed('pokeapi', p.ready ? 'on' : p.error ? 'error' : 'wait',
       p.ready ? `名稱索引 ${p.count} 筆` : p.error || '名稱索引載入中');
-    const askLed = document.querySelector('[data-led="ask"]');
-    askLed.hidden = !st.ask;
-    if (st.ask) setLed('ask', 'on', st.ask === 'openai' ? `模型 ${st.model}` : 'n8n Webhook', st.ask === 'openai' ? 'OpenAI' : 'n8n');
+    document.querySelector('[data-led="ai"]').hidden = !st.aiSearch;
+    if (st.aiSearch) {
+      setLed('ai', 'on', `AI 判斷搜尋：${st.model}`);
+      input.placeholder = '名稱、編號，或描述（黃色老鼠）';
+    }
+    document.querySelector('[data-led="n8n"]').hidden = !st.n8n;
+    if (st.n8n) setLed('n8n', 'on', 'n8n Webhook');
     if (!p.ready) setTimeout(loadStatus, 3000);
     if (state.current) renderAsk();
   } catch {
@@ -61,6 +72,7 @@ let debounce = null;
 
 input.addEventListener('input', () => {
   clearTimeout(debounce);
+  cancelAi();
   if (!input.value.trim()) {
     state.searchCtl?.abort();
     closeList();
@@ -69,8 +81,12 @@ input.addEventListener('input', () => {
   debounce = setTimeout(runSearch, 120);
 });
 
+// 注音／拼音選字中不送 AI（「ㄏㄨㄤˊ」這種半成品沒意義）
+input.addEventListener('compositionstart', () => (state.composing = true));
+input.addEventListener('compositionend', () => (state.composing = false));
+
 input.addEventListener('focus', () => {
-  if (state.results.length && input.value.trim()) openList();
+  if (state.options.length && input.value.trim()) openList();
 });
 
 async function runSearch() {
@@ -83,12 +99,59 @@ async function runSearch() {
     const { results } = await api(`/api/search?q=${encodeURIComponent(q)}&limit=12`, { signal: state.searchCtl.signal });
     if (seq !== state.searchSeq) return;
     state.results = results;
-    state.active = results.length ? 0 : -1;
+    if (state.ai.q !== q) state.ai = { q, status: 'idle', results: [], error: '' };
+    // 名稱比對太弱（沒結果，或最好的只是零星字元相符）→ 停手 0.6 秒後自動交給 AI
+    if (state.ai.status === 'idle' && aiEligible(q) && !state.composing && isWeak(results)) {
+      state.ai.status = 'wait';
+      state.aiTimer = setTimeout(() => runAi(q), 600);
+    }
+    state.active = -1;
     renderList(q);
   } catch (err) {
     if (err.name === 'AbortError') return;
     toast(err.message, { type: 'error', id: 'search' });
   }
+}
+
+/* ---------- AI 判斷模糊查詢 ---------- */
+const BOPOMOFO = /[㄀-ㄯˇˊˋ˙]/;
+
+/** .env 有開 AI，且查詢像一段描述（不是編號、不是只打一兩個字母、不是注音半成品） */
+function aiEligible(q) {
+  if (!state.status?.aiSearch) return false;
+  if (/^(?:#|no\.?\s*)?\d+$/i.test(q) || BOPOMOFO.test(q)) return false;
+  const compact = q.replace(/\s+/g, '');
+  return /[^\x00-\x7F]/.test(compact) ? Array.from(compact).length >= 2 : compact.length >= 3;
+}
+
+// 700 以上是「整個名字打錯 1 字」以內的相符；更低多半是字元零星相符（「老鼠」→ 地鼠）
+const isWeak = (results) => !results.length || results[0].score < 700;
+
+function cancelAi() {
+  clearTimeout(state.aiTimer);
+  state.aiCtl?.abort();
+  if (state.ai.status === 'wait' || state.ai.status === 'loading') state.ai.status = 'idle';
+}
+
+async function runAi(q) {
+  clearTimeout(state.aiTimer);
+  if (state.ai.q !== q || state.ai.status === 'loading' || state.ai.status === 'done') return;
+  state.aiCtl?.abort();
+  const ctl = (state.aiCtl = new AbortController());
+  state.ai = { q, status: 'loading', results: [], error: '' };
+  renderList(q);
+  try {
+    const { results, aiError } = await api(`/api/ai-search?q=${encodeURIComponent(q)}`, { signal: ctl.signal });
+    if (state.ai.q !== q) return;
+    state.ai = { q, status: 'done', results, error: '', fallback: Boolean(aiError) };
+  } catch (err) {
+    if (err.name === 'AbortError' || state.ai.q !== q) return;
+    state.ai = { q, status: 'error', results: [], error: err.message };
+  }
+  if (input.value.trim() !== q) return;
+  // 名稱比對完全沒東西時，游標直接放到 AI 的第一個建議
+  if (state.active < 0 && !state.results.length && state.ai.results.length) state.active = 0;
+  renderList(q);
 }
 
 /** 查詢字依序出現就標亮（打錯字時不標，免得亂亮） */
@@ -124,30 +187,74 @@ function highlight(text, q) {
   return out;
 }
 
+/**
+ * 下拉：名稱比對結果 → 「✦ AI 判斷」段落（判斷中／建議／失敗）或「交給 AI 判斷」那一列。
+ * state.options 跟畫面上可選的列一一對應，鍵盤上下就是在這個陣列裡移動。
+ */
 function renderList(q) {
-  if (!state.results.length) {
-    list.replaceChildren(h('li', { class: 'results-empty', role: 'presentation' }, `找不到和「${q}」相近的寶可夢`));
-    openList();
-    return;
-  }
-  list.replaceChildren(
-    ...state.results.map((r, i) =>
-      h('li', {
-        class: 'result',
-        id: `opt-${i}`,
-        role: 'option',
-        'aria-selected': String(i === state.active),
-        onmousedown: (e) => e.preventDefault(), // 保留輸入框焦點
-        onclick: () => choose(i),
-        onmousemove: () => setActive(i, false),
-      },
+  const options = state.results.map((r) => ({ kind: 'pokemon', r, from: 'name' }));
+  state.listQ = q;
+  if (state.active < 0 && options.length) state.active = 0;
+  const rows = [];
+  const optionRow = (i, attrs, ...children) =>
+    h('li', {
+      id: `opt-${i}`,
+      role: 'option',
+      'aria-selected': String(i === state.active),
+      onmousedown: (e) => e.preventDefault(), // 保留輸入框焦點
+      onclick: () => choose(i),
+      onmousemove: () => setActive(i, false),
+      ...attrs,
+    }, ...children);
+  // sub：AI 給的理由；local：AI 沒挑滿、用本機候選補的（理由是圖鑑資料比對出來的，顏色淡一點）
+  const pokemonRow = (i, r, sub, local = false) =>
+    optionRow(i, { class: sub ? `result result-ai${local ? ' result-local' : ''}` : 'result' },
       h('img', { src: r.sprite, alt: '', width: 48, height: 48, loading: 'lazy', onerror: (e) => (e.target.style.visibility = 'hidden') }),
       h('span', { class: 'no' }, `No.${pad3(r.dexNo)}`),
-      h('span', { class: 'nm' }, highlight(r.zh || r.en, q), r.zh ? h('small', {}, highlight(r.en, q)) : null),
+      sub
+        ? h('span', { class: 'nm' }, r.zh || r.en, h('small', {}, sub))
+        : h('span', { class: 'nm' }, highlight(r.zh || r.en, q), r.zh ? h('small', {}, highlight(r.en, q)) : null),
       h('span', { class: 'chips' }, r.types.map((t) => typeChip(t, 'chip-sm'))),
-      ),
-    ),
-  );
+    );
+  const note = (text, cls = 'results-empty') => h('li', { class: cls, role: 'presentation' }, text);
+
+  options.forEach((o, i) => rows.push(pokemonRow(i, o.r)));
+
+  const ai = state.ai.q === q ? state.ai : null;
+  if (aiEligible(q) && ai) {
+    if (ai.status === 'idle') {
+      // 名字完全打對（分數 1000+）就不多一列「交給 AI」
+      if (state.results[0]?.score >= 1000) return finishList(q, options, rows);
+      const i = options.push({ kind: 'ai' }) - 1;
+      rows.push(optionRow(i, { class: 'result result-trigger' }, h('span', {}, `✦ 交給 AI 判斷「${q}」`)));
+    } else {
+      if (!state.results.length) rows.push(note(`名稱裡找不到「${q}」`));
+      rows.push(note(ai.results.length ? `✦ AI 判斷・前 ${ai.results.length} 名` : '✦ AI 判斷', 'results-head'));
+      if (ai.fallback) rows.push(note('AI 沒回應，先列圖鑑資料（顏色／屬性／分類）最接近的', 'results-empty results-small'));
+      if (ai.status === 'wait' || ai.status === 'loading') {
+        rows.push(note('AI 想想看是哪一隻…', 'results-empty results-wait'));
+      } else if (ai.status === 'error') {
+        rows.push(note(`AI 判斷失敗：${ai.error}`, 'results-empty results-error'));
+      } else {
+        const nameIds = new Set(state.results.map((r) => r.id));
+        const picks = ai.results.filter((r) => !nameIds.has(r.id));
+        if (!picks.length) rows.push(note(ai.results.length ? 'AI 的答案就在上面' : 'AI 也猜不出是哪一隻'));
+        for (const r of picks) {
+          const i = options.push({ kind: 'pokemon', r, from: 'ai' }) - 1;
+          rows.push(pokemonRow(i, r, r.reason || 'AI 建議', r.source === 'local'));
+        }
+      }
+    }
+  } else if (!state.results.length) {
+    rows.push(note(`找不到和「${q}」相近的寶可夢`));
+  }
+  finishList(q, options, rows);
+}
+
+function finishList(q, options, rows) {
+  state.options = options;
+  if (state.active >= options.length) state.active = options.length ? 0 : -1;
+  list.replaceChildren(...rows);
   openList();
 }
 
@@ -184,14 +291,16 @@ window.addEventListener('resize', () => !list.hidden && placeList());
 function setActive(i, scroll = true) {
   if (i === state.active) return;
   state.active = i;
-  list.querySelectorAll('.result').forEach((el, j) => el.setAttribute('aria-selected', String(j === i)));
+  list.querySelectorAll('[role="option"]').forEach((el) => el.setAttribute('aria-selected', String(el.id === `opt-${i}`)));
   input.setAttribute('aria-activedescendant', `opt-${i}`);
   if (scroll) list.querySelector(`#opt-${i}`)?.scrollIntoView({ block: 'nearest' });
 }
 
 function choose(i) {
-  const r = state.results[i];
-  if (!r) return;
+  const o = state.options[i];
+  if (!o) return;
+  if (o.kind === 'ai') return runAi(input.value.trim());
+  const { r } = o;
   closeList();
   input.value = r.zh || r.en;
   input.blur();
@@ -199,13 +308,13 @@ function choose(i) {
 }
 
 input.addEventListener('keydown', (e) => {
-  const n = state.results.length;
+  const n = state.options.length;
   if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
     if (!n) return;
     e.preventDefault();
     if (list.hidden) return openList();
     const step = e.key === 'ArrowDown' ? 1 : -1;
-    setActive((state.active + step + n) % n);
+    setActive(state.active < 0 ? (step > 0 ? 0 : n - 1) : (state.active + step + n) % n);
   } else if (e.key === 'Escape') {
     if (!list.hidden) {
       e.preventDefault();
@@ -219,8 +328,19 @@ form.addEventListener('submit', async (e) => {
   const q = input.value.trim();
   if (!q) return;
   clearTimeout(debounce);
-  // 下拉有結果就選目前那筆；還沒回來就讓伺服器直接找最接近的
-  if (!list.hidden && state.results.length && state.active >= 0) return choose(state.active);
+  // 下拉有結果、而且是這次輸入的結果，就選目前那筆（打太快時下拉還是上一個字的，不能選）
+  if (!list.hidden && state.listQ === q && state.options.length && state.active >= 0) return choose(state.active);
+  if (aiEligible(q)) {
+    // 打太快、名稱結果還沒回來：先等名稱比對，有結果就照常選第一筆
+    if (state.ai.q !== q) {
+      await runSearch();
+      if (input.value.trim() !== q) return;
+      if (state.options.length && state.active >= 0) return choose(state.active);
+    }
+    // 名稱比對不到、AI 還沒判斷完：馬上交給 AI（不等那 0.6 秒），結果出來再選
+    if (state.ai.q === q && state.ai.status !== 'done') return runAi(q);
+  }
+  // 還沒回來就讓伺服器直接找最接近的
   closeList();
   input.blur();
   loadPokemon(q);
@@ -297,7 +417,7 @@ window.addEventListener('popstate', () => {
    ┌ 點陣圖   ┬ 名字／說明／基本資料／特性 ┐
    ├ 受到傷害 ┼ 種族值                    ┤
    ├ 進化＋形態（整排）                   ┤
-   └ 串接（整排；.env 沒啟用就不出現）    ┘
+   └ n8n（整排；.env 沒啟用就不出現）     ┘
    ========================================================= */
 function renderDetail(d) {
   state.stopType?.();
@@ -514,22 +634,17 @@ function evolutionCell(d) {
 }
 
 /* =========================================================
-   串接格：用 OpenAI 還是 n8n 由 .env 決定（/api/status 的 ask），沒啟用就隱藏
+   n8n 格：.env 填了 N8N_WEBHOOK_URL 才出現（/api/status 的 n8n）
    ========================================================= */
-const ASK_COPY = {
-  openai: { title: 'AI 解說', placeholder: '想問什麼？留空就介紹這隻', button: '問 AI' },
-  n8n: { title: 'n8n', placeholder: '要附帶的訊息（可留空）', button: '送出' },
-};
-
 function renderAsk() {
   const slot = document.getElementById('ask-slot');
   const d = state.current;
-  const provider = state.status?.ask;
+  const enabled = Boolean(state.status?.n8n);
   if (!slot || !d) return;
-  slot.hidden = !provider;
-  if (!provider) return slot.replaceChildren();
+  slot.hidden = !enabled;
+  if (!enabled) return slot.replaceChildren();
 
-  const copy = ASK_COPY[provider];
+  const copy = { title: 'n8n', placeholder: '要附帶的訊息（可留空）', button: '送出' };
   const field = h('input', {
     type: 'text', maxlength: 300, placeholder: copy.placeholder, 'aria-label': copy.placeholder,
     onkeydown: (e) => e.key === 'Enter' && !e.isComposing && send(),

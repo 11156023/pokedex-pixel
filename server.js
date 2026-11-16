@@ -2,8 +2,8 @@
 import express from 'express';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { search, getPokemon, randomId, ensureIndex, indexStatus, summarize, HttpError } from './lib/pokeapi.js';
-import { integrationStatus, ask } from './lib/integrations.js';
+import { search, getPokemon, randomId, ensureIndex, indexStatus, summarize, resolvePicks, aiCandidates, fillTopN, HttpError } from './lib/pokeapi.js';
+import { integrationStatus, aiSearch, callN8n, AI_TOP_N } from './lib/integrations.js';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 try {
@@ -52,11 +52,31 @@ app.get('/api/pokemon/:key', async (req, res) => {
   res.json(await getPokemon(req.params.key.slice(0, 40)));
 });
 
-// 串接：OpenAI 或 n8n 由 .env 的 ASK_PROVIDER 決定
+// 名稱比對不到的描述（「綠色青蛙」）：先在本機依顏色／屬性／分類篩候選，再交給 AI 挑，固定輸出前 AI_TOP_N（15）名。
+// AI 挑不滿用本機候選補；AI 逾時／出錯但有候選時，直接給本機前幾名（aiError 說明原因）。
+// .env 沒填 OPENAI_API_KEY 時回 503
+app.get('/api/ai-search', rateLimit(20, 60_000), async (req, res) => {
+  const q = String(req.query.q || '').trim().slice(0, 60);
+  if (!q) return res.json({ q, candidates: 0, aiError: null, results: [] });
+  const candidates = await aiCandidates(q);
+  let picks = [];
+  let aiError = null;
+  try {
+    picks = await aiSearch(q, candidates);
+  } catch (err) {
+    if (!candidates.length || err.status === 503) throw err; // 沒候選可補、或根本沒開 AI，就照常回錯誤
+    aiError = err.message;
+    console.warn(`[GET /api/ai-search] ${err.message}（改用本機候選前 ${AI_TOP_N} 名）`);
+  }
+  const results = fillTopN(await resolvePicks(picks, candidates), candidates, q, AI_TOP_N);
+  res.json({ q, candidates: candidates.length, aiError, results });
+});
+
+// n8n Webhook（.env 填了 N8N_WEBHOOK_URL 才有）
 app.post('/api/ask', rateLimit(10, 60_000), async (req, res) => {
   const { id, text } = req.body || {};
   const d = await getPokemon(id);
-  res.json(await ask(summarize(d), String(text || '').slice(0, 300)));
+  res.json(await callN8n(summarize(d), String(text || '').slice(0, 300)));
 });
 
 app.use('/api', (req, res) => res.status(404).json({ error: '沒有這個 API' }));
@@ -74,7 +94,8 @@ const server = app.listen(PORT, () => {
     .then((idx) => console.log(`  名稱索引就緒：${idx.entries.length} 筆（來源 ${idx.source}）`))
     .catch((err) => console.warn('  名稱索引暫時載入失敗，第一次搜尋時會再試：', err.message));
   const st = integrationStatus();
-  console.log(`  串接：${st.ask === 'openai' ? `OpenAI（${st.model}）` : st.ask === 'n8n' ? 'n8n Webhook' : '未啟用（見 .env.example）'}`);
+  console.log(`  AI 判斷搜尋：${st.aiSearch ? `啟用（${st.model}）` : '未啟用（.env 填 OPENAI_API_KEY）'}`);
+  if (st.n8n) console.log('  n8n Webhook：啟用');
 });
 
 server.on('error', (err) => {

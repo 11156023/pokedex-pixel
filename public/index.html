@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="zh-Hant-TW">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PIXEL DEX 像素圖鑑</title>
+  <meta name="description" content="紅白機像素風寶可夢資料查詢：PokeAPI 模糊搜尋、種族值、屬性相性、進化鏈，可串 OpenAI 與 n8n。">
+  <meta name="theme-color" content="#A80020">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 8 8' shape-rendering='crispEdges'%3E%3Cpath fill='%23000' d='M2 0h4v1h1v1h1v4H7v1H6v1H2V7H1V6H0V2h1V1h1z'/%3E%3Cpath fill='%23F83800' d='M2 1h4v1h1v2H1V2h1z'/%3E%3Cpath fill='%23FCFCFC' d='M1 5h6v1H6v1H2V6H1z'/%3E%3Cpath fill='%23FCFCFC' d='M3 3h2v2H3z'/%3E%3C/svg%3E">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="top">
+    <div class="brand">
+      <span class="brand-ball" aria-hidden="true"></span>
+      <h1 class="brand-title">PIXEL DEX</h1>
+    </div>
+    <!-- 只顯示有在用的連線；串接用哪個由 .env 決定 -->
+    <ul class="leds" aria-label="連線狀態">
+      <li class="led" data-led="pokeapi" data-state="wait"><i aria-hidden="true"></i>PokeAPI</li>
+      <li class="led" data-led="ask" data-state="on" hidden><i aria-hidden="true"></i><span></span></li>
+    </ul>
+  </header>
+
+  <main class="console">
+    <!-- 單一主機面板：搜尋列在最上，下面的格子都對齊同一條 1/3：2/3 欄線 -->
+    <section class="window panel" aria-label="圖鑑">
+      <form class="panel-bar search" id="search-form" role="search" autocomplete="off">
+        <label for="q" class="search-caret" aria-hidden="true">▶</label>
+        <input id="q" name="q" type="search" enterkeyhint="search" maxlength="40"
+               placeholder="名稱或編號，打錯也找得到"
+               role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="results"
+               aria-label="搜尋寶可夢（中文、英文、日文、編號）">
+        <button type="button" class="btn btn-gold btn-square" id="btn-random" title="隨機一隻（R）" aria-label="隨機一隻">?</button>
+      </form>
+      <div id="view" class="view"></div>
+    </section>
+  </main>
+
+  <footer class="foot">
+    <p>資料來源 <a href="https://pokeapi.co/" target="_blank" rel="noopener">PokeAPI</a>　<kbd>/</kbd> 搜尋　<kbd>←</kbd><kbd>→</kbd> 切換　<kbd>R</kbd> 隨機</p>
+  </footer>
+
+  <!-- 下拉放在 body 底下用 fixed 定位，才不會被面板的像素圓角（clip-path）裁掉 -->
+  <ul class="results" id="results" role="listbox" aria-label="搜尋結果" hidden></ul>
+  <div class="toasts" id="toasts" aria-live="polite" aria-atomic="false"></div>
+
+  <script type="module" src="/js/app.js"></script>
+</body>
+</html>

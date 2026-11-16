@@ -1,0 +1,18 @@
+{
+  "name": "pokedex-pixel",
+  "version": "1.0.0",
+  "description": "紅白機像素風寶可夢圖鑑：Node.js + PokeAPI 模糊搜尋，可串 OpenAI 與 n8n webhook",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=20.12"
+  },
+  "dependencies": {
+    "express": "^5.1.0"
+  }
+}

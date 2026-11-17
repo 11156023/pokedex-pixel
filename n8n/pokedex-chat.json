@@ -1,0 +1,252 @@
+{
+  "name": "PIXEL DEX AI 建議討論（Webhook → AI Agent＋Memory）",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## PIXEL DEX × n8n：AI 建議討論（含記憶）\n網站 .env 設 `AI_PROVIDER=n8n` 時，圖鑑頁的「AI 建議討論」會 POST：\n`{ \"sessionId\": \"瀏覽器每天一個\", \"chatInput\": \"（在看 皮卡丘）對戰建議…\", \"system\": \"系統提示（含目前這隻的 PokeAPI 資料）\" }`\n\n1. 「OpenAI Chat Model」：Credential 選 **OpenAI**（API Key；自架／相容服務把 Base URL 填 `…/v1`），Model 用 By ID 打名字\n2. 「Simple Memory」：Session Key＝sessionId，同一個瀏覽器同一天＝同一段記憶（換寶可夢也接得上）\n   ⚠ Simple Memory 存在 n8n 記憶體，n8n 重開就清空；要長久保存換成 **Postgres Chat Memory**（Session Key 一樣填 `{{ $json.sessionId }}`）\n3. 右上 **Active** 打開，Production URL 填到網站 `.env`：`N8N_CHAT_WEBHOOK_URL=`\n\nAI Agent 可以再接 Tool 節點（查資料、算傷害…），最後回傳 `{ \"text\": \"回答\" }` 就好。",
+        "height": 400,
+        "width": 520
+      },
+      "id": "6a1e3c5b-7d9f-4b2a-8c4e-0f6b8d2a4c21",
+      "name": "說明",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -80,
+        -460
+      ]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "pokedex-chat",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "1c3e5a7b-9d2f-4e6a-b8c1-3d5f7a9b1c22",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        0
+      ],
+      "webhookId": "4e6a8c0b-2d4f-4a6c-9e1b-5f7d9b1d3e23"
+    },
+    {
+      "parameters": {
+        "jsCode": "const body = $input.first().json.body || {};\nconst messages = (Array.isArray(body.messages) ? body.messages : [])\n  .filter((m) => m && (m.role === 'user' || m.role === 'assistant') && m.content)\n  .slice(-12);\nconst last = messages[messages.length - 1];\nconst prompt = String(body.chatInput || (last && last.role === 'user' ? last.content : '') || '請給這隻寶可夢的對戰建議');\n// body.system 是網站組好的系統提示（角色、規則、目前這隻的 PokeAPI 資料）；想自己寫就改這裡\nlet system = body.system || `你是寶可夢對戰與培育的顧問。圖鑑資料：${JSON.stringify(body.pokemon || {})}`;\nlet sessionId = String(body.sessionId || '').trim();\nif (!sessionId) {\n  const earlier = messages.slice(0, -1);\n  if (earlier.length) {\n    system += '\\n\\n先前的對話（接著這段回答）：\\n' +\n      earlier.map((m) => `${m.role === 'user' ? '訓練家' : '顧問'}：${m.content}`).join('\\n');\n  }\n  sessionId = `once-${Date.now()}-${Math.random().toString(36).slice(2)}`;\n}\nreturn [{ json: { sessionId, system, prompt } }];\n"
+      },
+      "id": "8b0d2f4a-6c8e-4a1c-b3d5-7f9b1d3f5a24",
+      "name": "整理對話",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "={{ $json.prompt }}",
+        "options": {
+          "systemMessage": "={{ $json.system }}"
+        }
+      },
+      "id": "3f5b7d9a-1c3e-4b5d-8f7a-9c1e3a5c7e25",
+      "name": "AI Agent",
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 1.7,
+      "position": [
+        480,
+        0
+      ],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "mode": "id",
+          "value": "gpt-4o-mini"
+        },
+        "options": {
+          "timeout": 45000,
+          "maxRetries": 0
+        }
+      },
+      "id": "0e2a4c6e-8b0d-4f2a-9c4e-6b8d0f2a4c30",
+      "name": "OpenAI Chat Model",
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.2,
+      "position": [
+        400,
+        240
+      ]
+    },
+    {
+      "parameters": {
+        "sessionIdType": "customKey",
+        "sessionKey": "={{ $json.sessionId }}",
+        "contextWindowLength": 12
+      },
+      "id": "c4e6a8c0-2d4f-4b6a-8e0c-2a4c6e8a0c31",
+      "name": "Simple Memory",
+      "type": "@n8n/n8n-nodes-langchain.memoryBufferWindow",
+      "typeVersion": 1.3,
+      "position": [
+        580,
+        240
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const r = $input.first().json;\nconst text = String(r.output || r.text || '').trim(); // AI Agent 的回答在 output\nif (!text) return [{ json: { ok: false, source: 'n8n', text: 'AI 沒有回答（可能想太久被截斷），再問一次試試' } }];\nreturn [{ json: { ok: true, source: 'n8n', text } }];\n"
+      },
+      "id": "5d7f9b1c-3e5a-4c7e-a9b2-1d3f5b7d9f26",
+      "name": "取出回答",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        860,
+        -100
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "firstIncomingItem",
+        "options": {}
+      },
+      "id": "7f9b1d3e-5a7c-4e9a-b1c3-3f5d7f9b1a27",
+      "name": "回傳回答",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        1100,
+        -100
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const e = $input.first().json;\nconst msg = (e.error && (e.error.message || e.error.description)) || e.message || JSON.stringify(e).slice(0, 200);\nreturn [{ json: { ok: false, source: 'n8n', text: `n8n 呼叫 AI 失敗：${msg}` } }];\n"
+      },
+      "id": "9b1d3f5a-7c9e-4a1b-83d5-5a7c9e1b3d28",
+      "name": "AI 失敗",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        860,
+        120
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "firstIncomingItem",
+        "options": {
+          "responseCode": 502
+        }
+      },
+      "id": "2a4c6e8b-0d2f-4c4e-a6b8-7c9e1a3c5e29",
+      "name": "回傳 502",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        1100,
+        120
+      ]
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "整理對話",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "整理對話": {
+      "main": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Agent": {
+      "main": [
+        [
+          {
+            "node": "取出回答",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "AI 失敗",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenAI Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Simple Memory": {
+      "ai_memory": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_memory",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "取出回答": {
+      "main": [
+        [
+          {
+            "node": "回傳回答",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI 失敗": {
+      "main": [
+        [
+          {
+            "node": "回傳 502",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {},
+  "tags": []
+}

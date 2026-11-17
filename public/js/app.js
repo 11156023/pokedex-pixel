@@ -1,4 +1,5 @@
 import { h, api, toast, loadingState, emptyState, errorState, cell, sectionTitle, segmented, typewriter, typeChip, pad3 } from './ui.js';
+import { renderMarkdown } from './md.js';
 
 const $ = (s) => document.querySelector(s);
 const view = $('#view');
@@ -17,14 +18,11 @@ const state = {
   searchSeq: 0,
   searchCtl: null,
   stopType: null,
-  ask: { busy: false, out: null },
-  // AI 判斷：名稱比對太弱時自動送，否則下拉最後一列可以手動送
-  ai: { q: '', status: 'idle', results: [], error: '' }, // status: idle | wait | loading | done | error
-  aiCtl: null,
-  aiTimer: null,
-  options: [], // 下拉裡可選的列：{ kind: 'pokemon', r, from: 'name' | 'ai' } | { kind: 'ai' }
+  // AI 建議討論：一整天一段對話，換寶可夢不會清掉（AI 會參考今天聊過的其他寶可夢）
+  // messages: [{ role: 'user' | 'assistant', content, pokemon: { id, name } }]；session 是今天這段對話的 ID（n8n Memory 用）
+  chat: null, // 由 loadChat() 從 localStorage 讀今天的對話
+  chatFull: false, // 討論區放大成全螢幕（Esc 或「縮小」回來）
   listQ: '', // 下拉目前顯示的是哪個查詢字的結果
-  composing: false,
 };
 
 const EGG_ZH = {
@@ -50,15 +48,10 @@ async function loadStatus() {
     const p = st.pokeapi;
     setLed('pokeapi', p.ready ? 'on' : p.error ? 'error' : 'wait',
       p.ready ? `名稱索引 ${p.count} 筆` : p.error || '名稱索引載入中');
-    document.querySelector('[data-led="ai"]').hidden = !st.aiSearch;
-    if (st.aiSearch) {
-      setLed('ai', 'on', `AI 判斷搜尋：${st.model}`);
-      input.placeholder = '名稱、編號，或描述（黃色老鼠）';
-    }
-    document.querySelector('[data-led="n8n"]').hidden = !st.n8n;
-    if (st.n8n) setLed('n8n', 'on', 'n8n Webhook');
+    document.querySelector('[data-led="ai"]').hidden = !st.chat;
+    if (st.chat) setLed('ai', 'on', `AI 建議討論：${st.chat === 'openai' ? st.model : '經 n8n（含 Memory）'}`);
     if (!p.ready) setTimeout(loadStatus, 3000);
-    if (state.current) renderAsk();
+    if (state.current) renderChat();
   } catch {
     setLed('pokeapi', 'error', '連不到本機伺服器');
     setTimeout(loadStatus, 5000);
@@ -72,7 +65,6 @@ let debounce = null;
 
 input.addEventListener('input', () => {
   clearTimeout(debounce);
-  cancelAi();
   if (!input.value.trim()) {
     state.searchCtl?.abort();
     closeList();
@@ -81,12 +73,8 @@ input.addEventListener('input', () => {
   debounce = setTimeout(runSearch, 120);
 });
 
-// 注音／拼音選字中不送 AI（「ㄏㄨㄤˊ」這種半成品沒意義）
-input.addEventListener('compositionstart', () => (state.composing = true));
-input.addEventListener('compositionend', () => (state.composing = false));
-
 input.addEventListener('focus', () => {
-  if (state.options.length && input.value.trim()) openList();
+  if (state.results.length && input.value.trim()) openList();
 });
 
 async function runSearch() {
@@ -99,59 +87,12 @@ async function runSearch() {
     const { results } = await api(`/api/search?q=${encodeURIComponent(q)}&limit=12`, { signal: state.searchCtl.signal });
     if (seq !== state.searchSeq) return;
     state.results = results;
-    if (state.ai.q !== q) state.ai = { q, status: 'idle', results: [], error: '' };
-    // 名稱比對太弱（沒結果，或最好的只是零星字元相符）→ 停手 0.6 秒後自動交給 AI
-    if (state.ai.status === 'idle' && aiEligible(q) && !state.composing && isWeak(results)) {
-      state.ai.status = 'wait';
-      state.aiTimer = setTimeout(() => runAi(q), 600);
-    }
-    state.active = -1;
+    state.active = results.length ? 0 : -1;
     renderList(q);
   } catch (err) {
     if (err.name === 'AbortError') return;
     toast(err.message, { type: 'error', id: 'search' });
   }
-}
-
-/* ---------- AI 判斷模糊查詢 ---------- */
-const BOPOMOFO = /[㄀-ㄯˇˊˋ˙]/;
-
-/** .env 有開 AI，且查詢像一段描述（不是編號、不是只打一兩個字母、不是注音半成品） */
-function aiEligible(q) {
-  if (!state.status?.aiSearch) return false;
-  if (/^(?:#|no\.?\s*)?\d+$/i.test(q) || BOPOMOFO.test(q)) return false;
-  const compact = q.replace(/\s+/g, '');
-  return /[^\x00-\x7F]/.test(compact) ? Array.from(compact).length >= 2 : compact.length >= 3;
-}
-
-// 700 以上是「整個名字打錯 1 字」以內的相符；更低多半是字元零星相符（「老鼠」→ 地鼠）
-const isWeak = (results) => !results.length || results[0].score < 700;
-
-function cancelAi() {
-  clearTimeout(state.aiTimer);
-  state.aiCtl?.abort();
-  if (state.ai.status === 'wait' || state.ai.status === 'loading') state.ai.status = 'idle';
-}
-
-async function runAi(q) {
-  clearTimeout(state.aiTimer);
-  if (state.ai.q !== q || state.ai.status === 'loading' || state.ai.status === 'done') return;
-  state.aiCtl?.abort();
-  const ctl = (state.aiCtl = new AbortController());
-  state.ai = { q, status: 'loading', results: [], error: '' };
-  renderList(q);
-  try {
-    const { results, aiError } = await api(`/api/ai-search?q=${encodeURIComponent(q)}`, { signal: ctl.signal });
-    if (state.ai.q !== q) return;
-    state.ai = { q, status: 'done', results, error: '', fallback: Boolean(aiError) };
-  } catch (err) {
-    if (err.name === 'AbortError' || state.ai.q !== q) return;
-    state.ai = { q, status: 'error', results: [], error: err.message };
-  }
-  if (input.value.trim() !== q) return;
-  // 名稱比對完全沒東西時，游標直接放到 AI 的第一個建議
-  if (state.active < 0 && !state.results.length && state.ai.results.length) state.active = 0;
-  renderList(q);
 }
 
 /** 查詢字依序出現就標亮（打錯字時不標，免得亂亮） */
@@ -187,74 +128,31 @@ function highlight(text, q) {
   return out;
 }
 
-/**
- * 下拉：名稱比對結果 → 「✦ AI 判斷」段落（判斷中／建議／失敗）或「交給 AI 判斷」那一列。
- * state.options 跟畫面上可選的列一一對應，鍵盤上下就是在這個陣列裡移動。
- */
 function renderList(q) {
-  const options = state.results.map((r) => ({ kind: 'pokemon', r, from: 'name' }));
   state.listQ = q;
-  if (state.active < 0 && options.length) state.active = 0;
-  const rows = [];
-  const optionRow = (i, attrs, ...children) =>
-    h('li', {
-      id: `opt-${i}`,
-      role: 'option',
-      'aria-selected': String(i === state.active),
-      onmousedown: (e) => e.preventDefault(), // 保留輸入框焦點
-      onclick: () => choose(i),
-      onmousemove: () => setActive(i, false),
-      ...attrs,
-    }, ...children);
-  // sub：AI 給的理由；local：AI 沒挑滿、用本機候選補的（理由是圖鑑資料比對出來的，顏色淡一點）
-  const pokemonRow = (i, r, sub, local = false) =>
-    optionRow(i, { class: sub ? `result result-ai${local ? ' result-local' : ''}` : 'result' },
+  if (!state.results.length) {
+    list.replaceChildren(h('li', { class: 'results-empty', role: 'presentation' }, `找不到和「${q}」相近的寶可夢`));
+    openList();
+    return;
+  }
+  list.replaceChildren(
+    ...state.results.map((r, i) =>
+      h('li', {
+        class: 'result',
+        id: `opt-${i}`,
+        role: 'option',
+        'aria-selected': String(i === state.active),
+        onmousedown: (e) => e.preventDefault(), // 保留輸入框焦點
+        onclick: () => choose(i),
+        onmousemove: () => setActive(i, false),
+      },
       h('img', { src: r.sprite, alt: '', width: 48, height: 48, loading: 'lazy', onerror: (e) => (e.target.style.visibility = 'hidden') }),
       h('span', { class: 'no' }, `No.${pad3(r.dexNo)}`),
-      sub
-        ? h('span', { class: 'nm' }, r.zh || r.en, h('small', {}, sub))
-        : h('span', { class: 'nm' }, highlight(r.zh || r.en, q), r.zh ? h('small', {}, highlight(r.en, q)) : null),
+      h('span', { class: 'nm' }, highlight(r.zh || r.en, q), r.zh ? h('small', {}, highlight(r.en, q)) : null),
       h('span', { class: 'chips' }, r.types.map((t) => typeChip(t, 'chip-sm'))),
-    );
-  const note = (text, cls = 'results-empty') => h('li', { class: cls, role: 'presentation' }, text);
-
-  options.forEach((o, i) => rows.push(pokemonRow(i, o.r)));
-
-  const ai = state.ai.q === q ? state.ai : null;
-  if (aiEligible(q) && ai) {
-    if (ai.status === 'idle') {
-      // 名字完全打對（分數 1000+）就不多一列「交給 AI」
-      if (state.results[0]?.score >= 1000) return finishList(q, options, rows);
-      const i = options.push({ kind: 'ai' }) - 1;
-      rows.push(optionRow(i, { class: 'result result-trigger' }, h('span', {}, `✦ 交給 AI 判斷「${q}」`)));
-    } else {
-      if (!state.results.length) rows.push(note(`名稱裡找不到「${q}」`));
-      rows.push(note(ai.results.length ? `✦ AI 判斷・前 ${ai.results.length} 名` : '✦ AI 判斷', 'results-head'));
-      if (ai.fallback) rows.push(note('AI 沒回應，先列圖鑑資料（顏色／屬性／分類）最接近的', 'results-empty results-small'));
-      if (ai.status === 'wait' || ai.status === 'loading') {
-        rows.push(note('AI 想想看是哪一隻…', 'results-empty results-wait'));
-      } else if (ai.status === 'error') {
-        rows.push(note(`AI 判斷失敗：${ai.error}`, 'results-empty results-error'));
-      } else {
-        const nameIds = new Set(state.results.map((r) => r.id));
-        const picks = ai.results.filter((r) => !nameIds.has(r.id));
-        if (!picks.length) rows.push(note(ai.results.length ? 'AI 的答案就在上面' : 'AI 也猜不出是哪一隻'));
-        for (const r of picks) {
-          const i = options.push({ kind: 'pokemon', r, from: 'ai' }) - 1;
-          rows.push(pokemonRow(i, r, r.reason || 'AI 建議', r.source === 'local'));
-        }
-      }
-    }
-  } else if (!state.results.length) {
-    rows.push(note(`找不到和「${q}」相近的寶可夢`));
-  }
-  finishList(q, options, rows);
-}
-
-function finishList(q, options, rows) {
-  state.options = options;
-  if (state.active >= options.length) state.active = options.length ? 0 : -1;
-  list.replaceChildren(...rows);
+      ),
+    ),
+  );
   openList();
 }
 
@@ -297,10 +195,8 @@ function setActive(i, scroll = true) {
 }
 
 function choose(i) {
-  const o = state.options[i];
-  if (!o) return;
-  if (o.kind === 'ai') return runAi(input.value.trim());
-  const { r } = o;
+  const r = state.results[i];
+  if (!r) return;
   closeList();
   input.value = r.zh || r.en;
   input.blur();
@@ -308,7 +204,7 @@ function choose(i) {
 }
 
 input.addEventListener('keydown', (e) => {
-  const n = state.options.length;
+  const n = state.results.length;
   if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
     if (!n) return;
     e.preventDefault();
@@ -329,17 +225,7 @@ form.addEventListener('submit', async (e) => {
   if (!q) return;
   clearTimeout(debounce);
   // 下拉有結果、而且是這次輸入的結果，就選目前那筆（打太快時下拉還是上一個字的，不能選）
-  if (!list.hidden && state.listQ === q && state.options.length && state.active >= 0) return choose(state.active);
-  if (aiEligible(q)) {
-    // 打太快、名稱結果還沒回來：先等名稱比對，有結果就照常選第一筆
-    if (state.ai.q !== q) {
-      await runSearch();
-      if (input.value.trim() !== q) return;
-      if (state.options.length && state.active >= 0) return choose(state.active);
-    }
-    // 名稱比對不到、AI 還沒判斷完：馬上交給 AI（不等那 0.6 秒），結果出來再選
-    if (state.ai.q === q && state.ai.status !== 'done') return runAi(q);
-  }
+  if (!list.hidden && state.listQ === q && state.results.length && state.active >= 0) return choose(state.active);
   // 還沒回來就讓伺服器直接找最接近的
   closeList();
   input.blur();
@@ -378,7 +264,6 @@ async function loadPokemon(key, { push = true } = {}) {
     state.current = d;
     if (changed) {
       state.spriteMode = d.sprites.front ? 'front' : 'art';
-      state.ask.out = null;
     }
     renderDetail(d);
     if (d.resolvedFrom) toast(`「${d.resolvedFrom}」最接近的是 ${d.names.zh}`, { type: 'info', id: 'resolved' });
@@ -417,7 +302,7 @@ window.addEventListener('popstate', () => {
    ┌ 點陣圖   ┬ 名字／說明／基本資料／特性 ┐
    ├ 受到傷害 ┼ 種族值                    ┤
    ├ 進化＋形態（整排）                   ┤
-   └ n8n（整排；.env 沒啟用就不出現）     ┘
+   └ AI 建議討論（整排；.env 沒啟用就不出現）┘
    ========================================================= */
 function renderDetail(d) {
   state.stopType?.();
@@ -428,10 +313,10 @@ function renderDetail(d) {
     matchupCell(d),
     statsCell(d),
     evolutionCell(d),
-    h('section', { class: 'cell c-full ask', id: 'ask-slot', hidden: true }),
+    h('section', { class: 'cell c-full chat', id: 'chat-slot', hidden: true }),
   );
   view.replaceChildren(grid);
-  renderAsk();
+  renderChat();
   state.stopType = typewriter(flavorEl, d.flavor?.text || '（這隻還沒有圖鑑說明）');
   // 種族值條：先 0 再長到目標寬度（setTimeout，背景分頁也會到位）
   setTimeout(() => {
@@ -634,46 +519,193 @@ function evolutionCell(d) {
 }
 
 /* =========================================================
-   n8n 格：.env 填了 N8N_WEBHOOK_URL 才出現（/api/status 的 n8n）
+   AI 建議討論：.env 的 AI_PROVIDER（OpenAI 或 n8n）有啟用才出現（/api/status 的 chat）
+   一天一段對話：換寶可夢不清掉，每則問題記下當時在看哪一隻，AI 會參考今天聊過的其他寶可夢
+   - session：今天這段對話的隨機 ID（n8n 的 Memory 節點用它分開每個瀏覽器、每一天）
+   - 存在這個瀏覽器的 localStorage（重新整理還在）；隔天或按「清除」就換新的 session
    ========================================================= */
-function renderAsk() {
-  const slot = document.getElementById('ask-slot');
-  const d = state.current;
-  const enabled = Boolean(state.status?.n8n);
-  if (!slot || !d) return;
-  slot.hidden = !enabled;
-  if (!enabled) return slot.replaceChildren();
+const CHAT_STORE = 'pokedex-chat';
+const localDate = () => {
+  const t = new Date();
+  return `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, '0')}-${String(t.getDate()).padStart(2, '0')}`;
+};
+const newSession = () =>
+  crypto.randomUUID?.() || Array.from(crypto.getRandomValues(new Uint8Array(16)), (b) => b.toString(16).padStart(2, '0')).join('');
+const freshChat = () => ({ date: localDate(), session: newSession(), messages: [], busy: false, draft: '' });
 
-  const copy = { title: 'n8n', placeholder: '要附帶的訊息（可留空）', button: '送出' };
-  const field = h('input', {
-    type: 'text', maxlength: 300, placeholder: copy.placeholder, 'aria-label': copy.placeholder,
-    onkeydown: (e) => e.key === 'Enter' && !e.isComposing && send(),
-  });
-  const btn = h('button', { class: 'btn btn-a', type: 'button', disabled: state.ask.busy || null, onclick: send },
-    state.ask.busy ? '傳送中…' : copy.button);
-
-  async function send() {
-    if (state.ask.busy) return;
-    const target = state.current;
-    state.ask.busy = true;
-    btn.disabled = true;
-    btn.textContent = '傳送中…';
-    try {
-      const res = await api('/api/ask', { method: 'POST', body: { id: target.id, text: field.value.trim() } });
-      if (state.current?.id === target.id) state.ask.out = res.text;
-    } catch (err) {
-      toast(err.message, { type: 'error', id: 'ask' });
-    } finally {
-      state.ask.busy = false;
-      renderAsk();
+function loadChat() {
+  try {
+    const s = JSON.parse(localStorage.getItem(CHAT_STORE) || 'null');
+    if (s && s.date === localDate() && typeof s.session === 'string' && Array.isArray(s.messages)) {
+      const messages = s.messages.filter((m) => m && (m.role === 'user' || m.role === 'assistant') && typeof m.content === 'string');
+      return { date: s.date, session: s.session, messages, busy: false, draft: '' };
     }
+  } catch {
+    /* 無痕模式或被封鎖：只是重新整理後不會保留 */
+  }
+  return freshChat();
+}
+
+function saveChat(c) {
+  try {
+    localStorage.setItem(CHAT_STORE, JSON.stringify({ date: c.date, session: c.session, messages: c.messages }));
+  } catch {
+    /* 存不了就算了，對話還在畫面上 */
+  }
+}
+
+state.chat = loadChat();
+
+const CHAT_QUICK = [
+  { label: '對戰建議', text: (n) => `${n}在對戰中適合當什麼角色？推薦招式、特性、道具和性格。` },
+  { label: '配隊建議', text: (n) => `推薦 2～3 隻能跟${n}互補、補它弱點的隊友。` },
+  { label: '培育建議', text: (n) => `${n}的努力值和性格怎麼配？進化或取得時要注意什麼？` },
+  { label: '怎麼打倒牠', text: (n) => `對手派出${n}時，要怎麼應付？` },
+];
+
+function renderChat() {
+  const slot = document.getElementById('chat-slot');
+  const d = state.current;
+  const provider = state.status?.chat;
+  if (!slot || !d || !provider) { // 沒有圖鑑頁或沒啟用：全螢幕圖層也一起收掉
+    state.chatFull = false;
+    document.getElementById('chat-overlay')?.remove();
+    document.body.classList.remove('chat-open');
+  }
+  if (!slot || !d) return;
+  if (!provider) {
+    slot.hidden = true;
+    slot.replaceChildren();
+    return;
+  }
+  // 全螢幕畫在 body 底下的獨立圖層：圖鑑窗有 clip-path／transform 動畫，fixed 放在裡面會被框住、被頁首蓋住
+  const full = state.chatFull;
+  let overlay = document.getElementById('chat-overlay');
+  if (full && !overlay) {
+    overlay = h('section', { id: 'chat-overlay', class: 'chat chat-full', role: 'dialog', 'aria-modal': 'true', 'aria-label': 'AI 建議討論' });
+    document.body.append(overlay);
+  } else if (!full && overlay) {
+    overlay.remove();
+  }
+  document.body.classList.toggle('chat-open', full); // 全螢幕時後面的頁面不捲動
+  slot.hidden = full;
+  if (full) slot.replaceChildren();
+  const root = full ? overlay : slot;
+
+  const c = state.chat;
+  const lastAbout = [...c.messages].reverse().find((m) => m.role === 'user')?.pokemon?.id;
+  const field = h('input', {
+    type: 'text', maxlength: 300, value: c.draft || '',
+    placeholder: lastAbout === d.id ? '接著問…' : `問 AI 關於${d.names.zh}…`,
+    'aria-label': '問 AI 的問題',
+    disabled: c.busy || null,
+    oninput: (e) => (c.draft = e.target.value),
+    onkeydown: (e) => e.key === 'Enter' && !e.isComposing && chatSend(field.value),
+  });
+  const sendBtn = h('button', { class: 'btn btn-a', type: 'button', disabled: c.busy || null, onclick: () => chatSend(field.value) }, '送出');
+  const send = chatSend;
+
+  // 你的話靠右（純文字）、AI 靠左（Markdown）；換聊另一隻時插一條「── 噴火龍 ──」分隔
+  const bubble = (m) =>
+    m.role === 'user'
+      ? h('p', { class: 'chat-msg chat-user', 'aria-label': '你' }, m.content)
+      : h('div', { class: 'chat-msg chat-ai md', 'aria-label': 'AI' }, renderMarkdown(m.content));
+  let shownAbout = null;
+  const items = [];
+  for (const m of c.messages) {
+    if (m.role === 'user' && m.pokemon && m.pokemon.id !== shownAbout) {
+      shownAbout = m.pokemon.id;
+      items.push(h('p', { class: 'chat-topic' }, m.pokemon.name));
+    }
+    items.push(bubble(m));
   }
 
-  slot.replaceChildren(
-    sectionTitle(copy.title),
-    h('div', { class: 'ask-row' }, field, btn),
-    state.ask.out ? h('p', { class: 'ask-out', 'aria-live': 'polite' }, state.ask.out) : null,
+  const log = c.messages.length || c.busy || full // 全螢幕時對話框撐滿中間，按鈕和輸入框固定在底下
+    ? h('div', { class: 'chat-log', 'aria-live': 'polite' },
+        items,
+        c.busy ? h('p', { class: 'chat-msg chat-ai chat-wait', 'aria-label': 'AI 思考中' }) : null)
+    : null;
+
+  // 標題列右邊的小字按鈕：清除（有對話才出現）、放大／縮小
+  const clear = c.messages.length
+    ? h('button', {
+        class: 'chat-tool', type: 'button', disabled: c.busy || null, title: '清除今天的對話（AI 也會忘記）',
+        onclick: () => {
+          state.chat = freshChat(); // 換新的 session：n8n Memory 也等於重新開始
+          saveChat(state.chat);
+          renderChat();
+        },
+      }, '↺ 清除')
+    : null;
+  const toggle = h('button', {
+    class: 'chat-tool chat-toggle', type: 'button',
+    title: full ? '縮小（Esc）' : '放大成全螢幕，專心討論',
+    'aria-pressed': full ? 'true' : 'false',
+    onclick: () => setChatFull(!full),
+  }, full ? '✕ 縮小' : '⛶ 全螢幕');
+
+  root.replaceChildren(
+    h('div', { class: 'chat-head' },
+      sectionTitle(full ? `AI 建議討論・${d.names.zh}` : 'AI 建議討論'),
+      h('div', { class: 'chat-tools' }, clear, toggle)),
+    ...(log ? [log] : []), // replaceChildren 會把 null 印成字
+    h('div', { class: 'chat-quick', role: 'group', 'aria-label': '快速提問' },
+      CHAT_QUICK.map((q) =>
+        h('button', { class: 'btn', type: 'button', disabled: c.busy || null, onclick: () => send(q.text(d.names.zh)) }, q.label)),
+    ),
+    h('div', { class: 'ask-row' }, field, sendBtn),
   );
+  if (log) log.scrollTop = log.scrollHeight;
+}
+
+/** 送出一個問題（記下當時在看哪一隻）；帶 sessionId 和今天的整段對話給 /api/chat */
+async function chatSend(raw) {
+  const text = String(raw || '').trim().slice(0, 300);
+  const about = state.current;
+  if (!text || !about || state.chat.busy) return;
+  if (state.chat.date !== localDate()) { // 過了午夜：新的一天重新開始，這句話當新對話的第一句
+    state.chat = freshChat();
+    toast('新的一天，AI 討論重新開始', { type: 'info', id: 'chat-day' });
+  }
+  const c = state.chat;
+  const pokemon = { id: about.id, name: about.names.zh };
+  c.messages.push({ role: 'user', content: text, pokemon });
+  c.draft = '';
+  c.busy = true;
+  saveChat(c);
+  renderChat();
+  try {
+    const res = await api('/api/chat', { method: 'POST', body: { id: about.id, sessionId: c.session, messages: c.messages } });
+    if (state.chat === c) c.messages.push({ role: 'assistant', content: res.text, pokemon });
+  } catch (err) {
+    if (state.chat !== c) return;
+    c.messages.pop(); // 沒問成功：問題放回輸入框，按一下就能重送
+    c.draft = text;
+    toast(err.message, { type: 'error', id: 'chat' });
+  } finally {
+    c.busy = false;
+    if (state.chat === c) {
+      saveChat(c);
+      renderChat();
+      chatRoot()?.querySelector('input')?.focus({ preventScroll: true });
+    }
+  }
+}
+
+/** 目前畫著討論區的元素：全螢幕時是 body 底下的 #chat-overlay，平常是圖鑑頁裡的 #chat-slot */
+const chatRoot = () => document.getElementById(state.chatFull ? 'chat-overlay' : 'chat-slot');
+
+/** 放大／縮小討論區；放大時游標進輸入框，縮小時回到「全螢幕」按鈕並捲回討論區 */
+function setChatFull(on) {
+  if (state.chatFull === on) return;
+  state.chatFull = on;
+  renderChat();
+  const root = chatRoot();
+  if (on) root?.querySelector('input')?.focus({ preventScroll: true });
+  else {
+    root?.scrollIntoView({ block: 'nearest' });
+    root?.querySelector('.chat-toggle')?.focus({ preventScroll: true });
+  }
 }
 
 /* =========================================================
@@ -681,6 +713,14 @@ function renderAsk() {
    ========================================================= */
 document.addEventListener('keydown', (e) => {
   if (e.ctrlKey || e.metaKey || e.altKey) return;
+  if (state.chatFull) {
+    // 全螢幕討論時：Esc 縮小，其他快捷鍵（/、←→、R）都停用，免得換掉正在討論的寶可夢
+    if (e.key === 'Escape' && !e.isComposing) {
+      e.preventDefault();
+      setChatFull(false);
+    }
+    return;
+  }
   const typing = e.target.closest('input, textarea, select, [contenteditable="true"]');
   if (typing) return;
   if (e.key === '/') {

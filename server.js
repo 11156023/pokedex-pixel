@@ -2,22 +2,21 @@
 import express from 'express';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { search, getPokemon, randomId, ensureIndex, indexStatus, summarize, resolvePicks, aiCandidates, fillTopN, HttpError } from './lib/pokeapi.js';
-import { integrationStatus, aiSearch, callN8n, AI_TOP_N } from './lib/integrations.js';
+import { search, getPokemon, randomId, ensureIndex, indexStatus, summarize, HttpError } from './lib/pokeapi.js';
+import { integrationStatus, chat } from './lib/integrations.js';
+import { loadEnv } from './lib/env.js';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
-try {
-  process.loadEnvFile(path.join(ROOT, '.env')); // Node 20.12+ 內建，不需要 dotenv；lib 都是呼叫時才讀 env
-} catch {
-  /* 沒有 .env 也能跑：只是 OpenAI / n8n 會顯示未設定 */
-}
+// 沒有 .env 也能跑（只是 AI／n8n 未啟用）；lib 都是呼叫時才讀 env，所以這裡載入就好
+const envFile = path.join(ROOT, '.env');
+const envResult = loadEnv(envFile);
 
 const app = express();
 const argPort = process.argv.indexOf('--port');
 const PORT = Number(argPort > 0 ? process.argv[argPort + 1] : process.env.PORT) || 3000;
 
 app.disable('x-powered-by');
-app.use(express.json({ limit: '32kb' }));
+app.use(express.json({ limit: '100kb' })); // AI 建議討論會帶最近 12 則對話
 app.use(express.static(path.join(ROOT, 'public'), { extensions: ['html'] }));
 
 /* 簡單的每 IP 限流：AI 與 n8n 會花錢或打外部服務 */
@@ -52,31 +51,13 @@ app.get('/api/pokemon/:key', async (req, res) => {
   res.json(await getPokemon(req.params.key.slice(0, 40)));
 });
 
-// 名稱比對不到的描述（「綠色青蛙」）：先在本機依顏色／屬性／分類篩候選，再交給 AI 挑，固定輸出前 AI_TOP_N（15）名。
-// AI 挑不滿用本機候選補；AI 逾時／出錯但有候選時，直接給本機前幾名（aiError 說明原因）。
-// .env 沒填 OPENAI_API_KEY 時回 503
-app.get('/api/ai-search', rateLimit(20, 60_000), async (req, res) => {
-  const q = String(req.query.q || '').trim().slice(0, 60);
-  if (!q) return res.json({ q, candidates: 0, aiError: null, results: [] });
-  const candidates = await aiCandidates(q);
-  let picks = [];
-  let aiError = null;
-  try {
-    picks = await aiSearch(q, candidates);
-  } catch (err) {
-    if (!candidates.length || err.status === 503) throw err; // 沒候選可補、或根本沒開 AI，就照常回錯誤
-    aiError = err.message;
-    console.warn(`[GET /api/ai-search] ${err.message}（改用本機候選前 ${AI_TOP_N} 名）`);
-  }
-  const results = fillTopN(await resolvePicks(picks, candidates), candidates, q, AI_TOP_N);
-  res.json({ q, candidates: candidates.length, aiError, results });
-});
-
-// n8n Webhook（.env 填了 N8N_WEBHOOK_URL 才有）
-app.post('/api/ask', rateLimit(10, 60_000), async (req, res) => {
-  const { id, text } = req.body || {};
+// AI 建議討論：{ id, sessionId, messages: [{ role, content, pokemon: { name } }] } → { text, provider }
+// id 是目前在看的那隻：伺服器自己查 PokeAPI 資料放進提示（不信任瀏覽器送來的資料）
+// sessionId：每個瀏覽器每天一個，n8n 模式給 Memory 節點用；OpenAI 或 n8n 由 .env 的 AI_PROVIDER 決定
+app.post('/api/chat', rateLimit(20, 60_000), async (req, res) => {
+  const { id, messages, sessionId } = req.body || {};
   const d = await getPokemon(id);
-  res.json(await callN8n(summarize(d), String(text || '').slice(0, 300)));
+  res.json(await chat(summarize(d), messages, sessionId));
 });
 
 app.use('/api', (req, res) => res.status(404).json({ error: '沒有這個 API' }));
@@ -90,12 +71,34 @@ app.use((err, req, res, next) => {
 
 const server = app.listen(PORT, () => {
   console.log(`▶ POKéDEX PIXEL 已啟動：http://localhost:${PORT}`);
+  const envLabel = {
+    builtin: `已讀取 ${envFile}`,
+    fallback: `已讀取 ${envFile}（Node ${process.versions.node} 沒有內建 loadEnvFile，用備援方式讀）`,
+    missing: `找不到 ${envFile}（照 .env.example 複製一份再填）`,
+    error: `讀取 ${envFile} 失敗：${envResult.error}`,
+  }[envResult.how];
+  console.log(`  設定檔：${envLabel}`);
   ensureIndex()
     .then((idx) => console.log(`  名稱索引就緒：${idx.entries.length} 筆（來源 ${idx.source}）`))
     .catch((err) => console.warn('  名稱索引暫時載入失敗，第一次搜尋時會再試：', err.message));
   const st = integrationStatus();
-  console.log(`  AI 判斷搜尋：${st.aiSearch ? `啟用（${st.model}）` : '未啟用（.env 填 OPENAI_API_KEY）'}`);
-  if (st.n8n) console.log('  n8n Webhook：啟用');
+  const want = (process.env.AI_PROVIDER || '').trim().toLowerCase();
+  const why =
+    want === 'off' ? 'AI_PROVIDER=off'
+    : want === 'n8n' ? 'AI_PROVIDER=n8n 但 N8N_CHAT_WEBHOOK_URL 是空的'
+    : want === 'openai' ? 'AI_PROVIDER=openai 但 OPENAI_API_KEY 是空的'
+    : '.env 的 OPENAI_API_KEY 和 N8N_CHAT_WEBHOOK_URL 都沒填';
+  const chatLabel = {
+    openai: `OpenAI（${st.model}；記憶在瀏覽器，帶今天最近的對話）`,
+    n8n: `n8n（${process.env.N8N_CHAT_WEBHOOK_URL.trim()}；記憶在 n8n 的 Memory 節點）`,
+  }[st.chat] || `未啟用（${why}）`;
+  console.log(`  AI 建議討論：${chatLabel}`);
+  if ((process.env.N8N_CHAT_WEBHOOK_URL || '').includes('/webhook-test/')) {
+    console.warn('  ⚠ N8N_CHAT_WEBHOOK_URL 是測試網址（/webhook-test/）：n8n 要先按「Listen for test event」，而且只收一次。正式用請把 workflow 設成 Active，改用 /webhook/');
+  }
+  if ((process.env.N8N_WEBHOOK_URL || '').trim()) {
+    console.log('  （N8N_WEBHOOK_URL 是舊的 n8n 圖鑑卡設定，已經拿掉了，可以從 .env 刪除）');
+  }
 });
 
 server.on('error', (err) => {

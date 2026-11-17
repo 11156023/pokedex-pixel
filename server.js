@@ -3,7 +3,7 @@ import express from 'express';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { search, getPokemon, randomId, ensureIndex, indexStatus, summarize, HttpError } from './lib/pokeapi.js';
-import { integrationStatus, chat, callN8n } from './lib/integrations.js';
+import { integrationStatus, chat } from './lib/integrations.js';
 import { loadEnv } from './lib/env.js';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
@@ -51,19 +51,13 @@ app.get('/api/pokemon/:key', async (req, res) => {
   res.json(await getPokemon(req.params.key.slice(0, 40)));
 });
 
-// AI 建議討論：{ id, messages: [{ role: 'user' | 'assistant', content }] } → { text, provider }
-// 伺服器自己查這隻的 PokeAPI 資料放進提示（不信任瀏覽器送來的資料）；OpenAI 或 n8n 由 .env 的 AI_PROVIDER 決定
+// AI 建議討論：{ id, sessionId, messages: [{ role, content, pokemon: { name } }] } → { text, provider }
+// id 是目前在看的那隻：伺服器自己查 PokeAPI 資料放進提示（不信任瀏覽器送來的資料）
+// sessionId：每個瀏覽器每天一個，n8n 模式給 Memory 節點用；OpenAI 或 n8n 由 .env 的 AI_PROVIDER 決定
 app.post('/api/chat', rateLimit(20, 60_000), async (req, res) => {
-  const { id, messages } = req.body || {};
+  const { id, messages, sessionId } = req.body || {};
   const d = await getPokemon(id);
-  res.json(await chat(summarize(d), messages));
-});
-
-// n8n Webhook（.env 填了 N8N_WEBHOOK_URL 才有）
-app.post('/api/ask', rateLimit(10, 60_000), async (req, res) => {
-  const { id, text } = req.body || {};
-  const d = await getPokemon(id);
-  res.json(await callN8n(summarize(d), String(text || '').slice(0, 300)));
+  res.json(await chat(summarize(d), messages, sessionId));
 });
 
 app.use('/api', (req, res) => res.status(404).json({ error: '沒有這個 API' }));
@@ -94,13 +88,16 @@ const server = app.listen(PORT, () => {
     : want === 'n8n' ? 'AI_PROVIDER=n8n 但 N8N_CHAT_WEBHOOK_URL 是空的'
     : want === 'openai' ? 'AI_PROVIDER=openai 但 OPENAI_API_KEY 是空的'
     : '.env 的 OPENAI_API_KEY 和 N8N_CHAT_WEBHOOK_URL 都沒填';
-  const chatLabel = { openai: `OpenAI（${st.model}）`, n8n: `n8n（${process.env.N8N_CHAT_WEBHOOK_URL.trim()}）` }[st.chat] || `未啟用（${why}）`;
+  const chatLabel = {
+    openai: `OpenAI（${st.model}；記憶在瀏覽器，帶今天最近的對話）`,
+    n8n: `n8n（${process.env.N8N_CHAT_WEBHOOK_URL.trim()}；記憶在 n8n 的 Memory 節點）`,
+  }[st.chat] || `未啟用（${why}）`;
   console.log(`  AI 建議討論：${chatLabel}`);
-  if (st.n8n) console.log(`  n8n 圖鑑卡：啟用（${process.env.N8N_WEBHOOK_URL.trim()}）`);
-  for (const k of ['N8N_CHAT_WEBHOOK_URL', 'N8N_WEBHOOK_URL']) {
-    if ((process.env[k] || '').includes('/webhook-test/')) {
-      console.warn(`  ⚠ ${k} 是測試網址（/webhook-test/）：n8n 要先按「Listen for test event」，而且只收一次。正式用請把 workflow 設成 Active，改用 /webhook/`);
-    }
+  if ((process.env.N8N_CHAT_WEBHOOK_URL || '').includes('/webhook-test/')) {
+    console.warn('  ⚠ N8N_CHAT_WEBHOOK_URL 是測試網址（/webhook-test/）：n8n 要先按「Listen for test event」，而且只收一次。正式用請把 workflow 設成 Active，改用 /webhook/');
+  }
+  if ((process.env.N8N_WEBHOOK_URL || '').trim()) {
+    console.log('  （N8N_WEBHOOK_URL 是舊的 n8n 圖鑑卡設定，已經拿掉了，可以從 .env 刪除）');
   }
 });
 

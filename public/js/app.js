@@ -18,9 +18,9 @@ const state = {
   searchSeq: 0,
   searchCtl: null,
   stopType: null,
-  ask: { busy: false, out: null },
-  // AI 建議討論：跟著目前這隻寶可夢，換一隻就重新開始
-  chat: { id: null, messages: [], busy: false, ctl: null }, // messages: [{ role: 'user' | 'assistant', content }]
+  // AI 建議討論：一整天一段對話，換寶可夢不會清掉（AI 會參考今天聊過的其他寶可夢）
+  // messages: [{ role: 'user' | 'assistant', content, pokemon: { id, name } }]；session 是今天這段對話的 ID（n8n Memory 用）
+  chat: null, // 由 loadChat() 從 localStorage 讀今天的對話
   chatFull: false, // 討論區放大成全螢幕（Esc 或「縮小」回來）
   listQ: '', // 下拉目前顯示的是哪個查詢字的結果
 };
@@ -49,14 +49,9 @@ async function loadStatus() {
     setLed('pokeapi', p.ready ? 'on' : p.error ? 'error' : 'wait',
       p.ready ? `名稱索引 ${p.count} 筆` : p.error || '名稱索引載入中');
     document.querySelector('[data-led="ai"]').hidden = !st.chat;
-    if (st.chat) setLed('ai', 'on', `AI 建議討論：${st.chat === 'openai' ? st.model : '經 n8n'}`);
-    document.querySelector('[data-led="n8n"]').hidden = !st.n8n;
-    if (st.n8n) setLed('n8n', 'on', 'n8n 圖鑑卡 Webhook');
+    if (st.chat) setLed('ai', 'on', `AI 建議討論：${st.chat === 'openai' ? st.model : '經 n8n（含 Memory）'}`);
     if (!p.ready) setTimeout(loadStatus, 3000);
-    if (state.current) {
-      renderChat();
-      renderAsk();
-    }
+    if (state.current) renderChat();
   } catch {
     setLed('pokeapi', 'error', '連不到本機伺服器');
     setTimeout(loadStatus, 5000);
@@ -269,9 +264,6 @@ async function loadPokemon(key, { push = true } = {}) {
     state.current = d;
     if (changed) {
       state.spriteMode = d.sprites.front ? 'front' : 'art';
-      state.ask.out = null;
-      state.chat.ctl?.abort();
-      state.chat = { id: d.id, messages: [], busy: false, ctl: null };
     }
     renderDetail(d);
     if (d.resolvedFrom) toast(`「${d.resolvedFrom}」最接近的是 ${d.names.zh}`, { type: 'info', id: 'resolved' });
@@ -310,8 +302,7 @@ window.addEventListener('popstate', () => {
    ┌ 點陣圖   ┬ 名字／說明／基本資料／特性 ┐
    ├ 受到傷害 ┼ 種族值                    ┤
    ├ 進化＋形態（整排）                   ┤
-   ├ AI 建議討論（整排；.env 沒啟用就不出現）┤
-   └ n8n 圖鑑卡（整排；.env 沒啟用就不出現）┘
+   └ AI 建議討論（整排；.env 沒啟用就不出現）┘
    ========================================================= */
 function renderDetail(d) {
   state.stopType?.();
@@ -323,11 +314,9 @@ function renderDetail(d) {
     statsCell(d),
     evolutionCell(d),
     h('section', { class: 'cell c-full chat', id: 'chat-slot', hidden: true }),
-    h('section', { class: 'cell c-full ask', id: 'ask-slot', hidden: true }),
   );
   view.replaceChildren(grid);
   renderChat();
-  renderAsk();
   state.stopType = typewriter(flavorEl, d.flavor?.text || '（這隻還沒有圖鑑說明）');
   // 種族值條：先 0 再長到目標寬度（setTimeout，背景分頁也會到位）
   setTimeout(() => {
@@ -531,8 +520,42 @@ function evolutionCell(d) {
 
 /* =========================================================
    AI 建議討論：.env 的 AI_PROVIDER（OpenAI 或 n8n）有啟用才出現（/api/status 的 chat）
-   快捷按鈕或自己打字 → POST /api/chat（帶整段對話，可以接著追問）；換一隻寶可夢就重新開始
+   一天一段對話：換寶可夢不清掉，每則問題記下當時在看哪一隻，AI 會參考今天聊過的其他寶可夢
+   - session：今天這段對話的隨機 ID（n8n 的 Memory 節點用它分開每個瀏覽器、每一天）
+   - 存在這個瀏覽器的 localStorage（重新整理還在）；隔天或按「清除」就換新的 session
    ========================================================= */
+const CHAT_STORE = 'pokedex-chat';
+const localDate = () => {
+  const t = new Date();
+  return `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, '0')}-${String(t.getDate()).padStart(2, '0')}`;
+};
+const newSession = () =>
+  crypto.randomUUID?.() || Array.from(crypto.getRandomValues(new Uint8Array(16)), (b) => b.toString(16).padStart(2, '0')).join('');
+const freshChat = () => ({ date: localDate(), session: newSession(), messages: [], busy: false, draft: '' });
+
+function loadChat() {
+  try {
+    const s = JSON.parse(localStorage.getItem(CHAT_STORE) || 'null');
+    if (s && s.date === localDate() && typeof s.session === 'string' && Array.isArray(s.messages)) {
+      const messages = s.messages.filter((m) => m && (m.role === 'user' || m.role === 'assistant') && typeof m.content === 'string');
+      return { date: s.date, session: s.session, messages, busy: false, draft: '' };
+    }
+  } catch {
+    /* 無痕模式或被封鎖：只是重新整理後不會保留 */
+  }
+  return freshChat();
+}
+
+function saveChat(c) {
+  try {
+    localStorage.setItem(CHAT_STORE, JSON.stringify({ date: c.date, session: c.session, messages: c.messages }));
+  } catch {
+    /* 存不了就算了，對話還在畫面上 */
+  }
+}
+
+state.chat = loadChat();
+
 const CHAT_QUICK = [
   { label: '對戰建議', text: (n) => `${n}在對戰中適合當什麼角色？推薦招式、特性、道具和性格。` },
   { label: '配隊建議', text: (n) => `推薦 2～3 隻能跟${n}互補、補它弱點的隊友。` },
@@ -570,60 +593,46 @@ function renderChat() {
   const root = full ? overlay : slot;
 
   const c = state.chat;
+  const lastAbout = [...c.messages].reverse().find((m) => m.role === 'user')?.pokemon?.id;
   const field = h('input', {
     type: 'text', maxlength: 300, value: c.draft || '',
-    placeholder: c.messages.length ? '接著問…' : `問 AI 關於${d.names.zh}…`,
+    placeholder: lastAbout === d.id ? '接著問…' : `問 AI 關於${d.names.zh}…`,
     'aria-label': '問 AI 的問題',
     disabled: c.busy || null,
     oninput: (e) => (c.draft = e.target.value),
-    onkeydown: (e) => e.key === 'Enter' && !e.isComposing && send(field.value),
+    onkeydown: (e) => e.key === 'Enter' && !e.isComposing && chatSend(field.value),
   });
-  const sendBtn = h('button', { class: 'btn btn-a', type: 'button', disabled: c.busy || null, onclick: () => send(field.value) }, '送出');
+  const sendBtn = h('button', { class: 'btn btn-a', type: 'button', disabled: c.busy || null, onclick: () => chatSend(field.value) }, '送出');
+  const send = chatSend;
 
-  async function send(raw) {
-    const text = String(raw || '').trim().slice(0, 300);
-    if (c.busy || !text || state.chat !== c) return;
-    c.messages.push({ role: 'user', content: text });
-    c.draft = '';
-    c.busy = true;
-    c.ctl = new AbortController();
-    renderChat();
-    try {
-      const res = await api('/api/chat', { method: 'POST', body: { id: c.id, messages: c.messages }, signal: c.ctl.signal });
-      if (state.chat === c) c.messages.push({ role: 'assistant', content: res.text });
-    } catch (err) {
-      if (err.name === 'AbortError' || state.chat !== c) return;
-      c.messages.pop(); // 沒問成功：問題放回輸入框，按一下就能重送
-      c.draft = text;
-      toast(err.message, { type: 'error', id: 'chat' });
-    } finally {
-      c.busy = false;
-      c.ctl = null;
-      if (state.chat === c) {
-        renderChat();
-        chatRoot()?.querySelector('input')?.focus({ preventScroll: true });
-      }
-    }
-  }
-
-  // 你的話靠右（純文字）、AI 靠左（Markdown）；還沒開始聊就不放對話框
+  // 你的話靠右（純文字）、AI 靠左（Markdown）；換聊另一隻時插一條「── 噴火龍 ──」分隔
   const bubble = (m) =>
     m.role === 'user'
       ? h('p', { class: 'chat-msg chat-user', 'aria-label': '你' }, m.content)
       : h('div', { class: 'chat-msg chat-ai md', 'aria-label': 'AI' }, renderMarkdown(m.content));
+  let shownAbout = null;
+  const items = [];
+  for (const m of c.messages) {
+    if (m.role === 'user' && m.pokemon && m.pokemon.id !== shownAbout) {
+      shownAbout = m.pokemon.id;
+      items.push(h('p', { class: 'chat-topic' }, m.pokemon.name));
+    }
+    items.push(bubble(m));
+  }
 
   const log = c.messages.length || c.busy || full // 全螢幕時對話框撐滿中間，按鈕和輸入框固定在底下
     ? h('div', { class: 'chat-log', 'aria-live': 'polite' },
-        c.messages.map(bubble),
+        items,
         c.busy ? h('p', { class: 'chat-msg chat-ai chat-wait', 'aria-label': 'AI 思考中' }) : null)
     : null;
 
   // 標題列右邊的小字按鈕：清除（有對話才出現）、放大／縮小
   const clear = c.messages.length
     ? h('button', {
-        class: 'chat-tool', type: 'button', disabled: c.busy || null, title: '清除對話',
+        class: 'chat-tool', type: 'button', disabled: c.busy || null, title: '清除今天的對話（AI 也會忘記）',
         onclick: () => {
-          state.chat = { id: c.id, messages: [], busy: false, ctl: null };
+          state.chat = freshChat(); // 換新的 session：n8n Memory 也等於重新開始
+          saveChat(state.chat);
           renderChat();
         },
       }, '↺ 清除')
@@ -649,6 +658,40 @@ function renderChat() {
   if (log) log.scrollTop = log.scrollHeight;
 }
 
+/** 送出一個問題（記下當時在看哪一隻）；帶 sessionId 和今天的整段對話給 /api/chat */
+async function chatSend(raw) {
+  const text = String(raw || '').trim().slice(0, 300);
+  const about = state.current;
+  if (!text || !about || state.chat.busy) return;
+  if (state.chat.date !== localDate()) { // 過了午夜：新的一天重新開始，這句話當新對話的第一句
+    state.chat = freshChat();
+    toast('新的一天，AI 討論重新開始', { type: 'info', id: 'chat-day' });
+  }
+  const c = state.chat;
+  const pokemon = { id: about.id, name: about.names.zh };
+  c.messages.push({ role: 'user', content: text, pokemon });
+  c.draft = '';
+  c.busy = true;
+  saveChat(c);
+  renderChat();
+  try {
+    const res = await api('/api/chat', { method: 'POST', body: { id: about.id, sessionId: c.session, messages: c.messages } });
+    if (state.chat === c) c.messages.push({ role: 'assistant', content: res.text, pokemon });
+  } catch (err) {
+    if (state.chat !== c) return;
+    c.messages.pop(); // 沒問成功：問題放回輸入框，按一下就能重送
+    c.draft = text;
+    toast(err.message, { type: 'error', id: 'chat' });
+  } finally {
+    c.busy = false;
+    if (state.chat === c) {
+      saveChat(c);
+      renderChat();
+      chatRoot()?.querySelector('input')?.focus({ preventScroll: true });
+    }
+  }
+}
+
 /** 目前畫著討論區的元素：全螢幕時是 body 底下的 #chat-overlay，平常是圖鑑頁裡的 #chat-slot */
 const chatRoot = () => document.getElementById(state.chatFull ? 'chat-overlay' : 'chat-slot');
 
@@ -663,49 +706,6 @@ function setChatFull(on) {
     root?.scrollIntoView({ block: 'nearest' });
     root?.querySelector('.chat-toggle')?.focus({ preventScroll: true });
   }
-}
-
-/* =========================================================
-   n8n 圖鑑卡格：.env 填了 N8N_WEBHOOK_URL 才出現（/api/status 的 n8n）
-   ========================================================= */
-function renderAsk() {
-  const slot = document.getElementById('ask-slot');
-  const d = state.current;
-  const enabled = Boolean(state.status?.n8n);
-  if (!slot || !d) return;
-  slot.hidden = !enabled;
-  if (!enabled) return slot.replaceChildren();
-
-  const copy = { title: 'n8n 圖鑑卡', placeholder: '要附帶的訊息（可留空）', button: '送出' };
-  const field = h('input', {
-    type: 'text', maxlength: 300, placeholder: copy.placeholder, 'aria-label': copy.placeholder,
-    onkeydown: (e) => e.key === 'Enter' && !e.isComposing && send(),
-  });
-  const btn = h('button', { class: 'btn btn-a', type: 'button', disabled: state.ask.busy || null, onclick: send },
-    state.ask.busy ? '傳送中…' : copy.button);
-
-  async function send() {
-    if (state.ask.busy) return;
-    const target = state.current;
-    state.ask.busy = true;
-    btn.disabled = true;
-    btn.textContent = '傳送中…';
-    try {
-      const res = await api('/api/ask', { method: 'POST', body: { id: target.id, text: field.value.trim() } });
-      if (state.current?.id === target.id) state.ask.out = res.text;
-    } catch (err) {
-      toast(err.message, { type: 'error', id: 'ask' });
-    } finally {
-      state.ask.busy = false;
-      renderAsk();
-    }
-  }
-
-  slot.replaceChildren(
-    sectionTitle(copy.title),
-    h('div', { class: 'ask-row' }, field, btn),
-    state.ask.out ? h('p', { class: 'ask-out', 'aria-live': 'polite' }, state.ask.out) : null,
-  );
 }
 
 /* =========================================================

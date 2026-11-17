@@ -617,7 +617,19 @@ body.chat-open { overflow: hidden; }
 .md th { color: var(--accent); font-weight: normal; }
 @media (max-width: 560px) { .chat-msg { max-width: 92%; } }
 
-/* ---------- n8n 圖鑑卡（整排） ---------- */
+/* 換聊另一隻時的分隔：── 噴火龍 ── */
+.chat-topic {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 6px 0 0;
+  color: var(--nes-gray);
+  font-size: 13px;
+}
+.chat-topic::before, .chat-topic::after { content: ''; flex: 1; border-top: 2px dashed var(--sub); }
+.chat-log > .chat-topic:first-child { margin-top: 0; }
+
+/* 討論區的輸入列 */
 .ask-row { display: flex; gap: 10px; align-items: stretch; flex-wrap: wrap; }
 .ask-row input {
   flex: 1 1 260px;
@@ -634,15 +646,6 @@ body.chat-open { overflow: hidden; }
 }
 .ask-row input:focus { outline: none; box-shadow: inset 0 0 0 3px var(--accent); }
 .ask-row input::placeholder { color: var(--nes-gray-d); }
-.ask-out {
-  margin: 14px 0 0;
-  padding: 14px 18px;
-  background: var(--sub-bg);
-  box-shadow: inset 0 0 0 2px var(--sub);
-  white-space: pre-wrap;
-  font-size: 16px;
-  line-height: 1.8;
-}
 
 /* ---------- 狀態（error → loading → empty） ---------- */
 .state {

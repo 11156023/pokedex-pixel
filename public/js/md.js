@@ -66,6 +66,7 @@ export function parseMarkdown(src) {
           if (items.length && indent <= items[0].indent && ordered !== items[0].ordered) break; // 換成另一種清單
           items.push({ indent, ordered, text: it[4] });
         }
+        else if (RE.fence.test(l) || (RE.tableRow.test(l) && RE.tableSep.test(lines[i + 1] || ''))) break; // 項目底下縮排的表格／程式碼：結束清單，交給外層排
         else if (l.trim() && /^\s+/.test(l) && items.length) items.at(-1).text += '\n' + l.trim(); // 項目換行接續
         else break;
       }

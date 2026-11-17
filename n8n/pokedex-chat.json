@@ -1,11 +1,11 @@
 {
-  "name": "PIXEL DEX AI 建議討論（Webhook → AI Agent）",
+  "name": "PIXEL DEX AI 建議討論（Webhook → AI Agent＋Memory）",
   "nodes": [
     {
       "parameters": {
-        "content": "## PIXEL DEX × n8n：AI 建議討論\n網站 .env 設 `AI_PROVIDER=n8n` 時，圖鑑頁的「AI 建議討論」會 POST：\n`{ \"system\": \"系統提示（含 PokeAPI 資料）\", \"messages\": [{ \"role\": \"user\", \"content\": \"…\" }], \"pokemon\": {摘要} }`\n\n1. 「OpenAI Chat Model」節點：Credential 選 **OpenAI**（API Key；自架／相容服務把 Base URL 填 `…/v1`）\n2. 同一個節點：Model 改成你的模型（By ID 可以直接打名字），推理模型可在 Options 設 Reasoning Effort\n3. 右上 **Active** 打開，Production URL 填到網站 `.env`：`N8N_CHAT_WEBHOOK_URL=`\n\nAI Agent 可以再接 Tool 節點（查資料、算傷害…），最後回傳 `{ \"text\": \"回答\" }` 就好。",
-        "height": 340,
-        "width": 460
+        "content": "## PIXEL DEX × n8n：AI 建議討論（含記憶）\n網站 .env 設 `AI_PROVIDER=n8n` 時，圖鑑頁的「AI 建議討論」會 POST：\n`{ \"sessionId\": \"瀏覽器每天一個\", \"chatInput\": \"（在看 皮卡丘）對戰建議…\", \"system\": \"系統提示（含目前這隻的 PokeAPI 資料）\" }`\n\n1. 「OpenAI Chat Model」：Credential 選 **OpenAI**（API Key；自架／相容服務把 Base URL 填 `…/v1`），Model 用 By ID 打名字\n2. 「Simple Memory」：Session Key＝sessionId，同一個瀏覽器同一天＝同一段記憶（換寶可夢也接得上）\n   ⚠ Simple Memory 存在 n8n 記憶體，n8n 重開就清空；要長久保存換成 **Postgres Chat Memory**（Session Key 一樣填 `{{ $json.sessionId }}`）\n3. 右上 **Active** 打開，Production URL 填到網站 `.env`：`N8N_CHAT_WEBHOOK_URL=`\n\nAI Agent 可以再接 Tool 節點（查資料、算傷害…），最後回傳 `{ \"text\": \"回答\" }` 就好。",
+        "height": 400,
+        "width": 520
       },
       "id": "6a1e3c5b-7d9f-4b2a-8c4e-0f6b8d2a4c21",
       "name": "說明",
@@ -13,7 +13,7 @@
       "typeVersion": 1,
       "position": [
         -80,
-        -400
+        -460
       ]
     },
     {
@@ -35,7 +35,7 @@
     },
     {
       "parameters": {
-        "jsCode": "const body = $input.first().json.body || {};\nconst messages = (Array.isArray(body.messages) ? body.messages : [])\n  .filter((m) => m && (m.role === 'user' || m.role === 'assistant') && m.content)\n  .slice(-12);\nconst last = messages[messages.length - 1];\nconst prompt = last && last.role === 'user' ? String(last.content) : '請給這隻寶可夢的對戰建議';\n// body.system 是網站組好的系統提示（角色、規則、這隻寶可夢的 PokeAPI 資料）；想自己寫就改這裡\nlet system = body.system || `你是寶可夢對戰與培育的顧問。圖鑑資料：${JSON.stringify(body.pokemon || {})}`;\nconst earlier = messages.slice(0, -1);\nif (earlier.length) {\n  system += '\\n\\n先前的對話（接著這段回答）：\\n' +\n    earlier.map((m) => `${m.role === 'user' ? '訓練家' : '顧問'}：${m.content}`).join('\\n');\n}\nreturn [{ json: { system, prompt } }];\n"
+        "jsCode": "const body = $input.first().json.body || {};\nconst messages = (Array.isArray(body.messages) ? body.messages : [])\n  .filter((m) => m && (m.role === 'user' || m.role === 'assistant') && m.content)\n  .slice(-12);\nconst last = messages[messages.length - 1];\nconst prompt = String(body.chatInput || (last && last.role === 'user' ? last.content : '') || '請給這隻寶可夢的對戰建議');\n// body.system 是網站組好的系統提示（角色、規則、目前這隻的 PokeAPI 資料）；想自己寫就改這裡\nlet system = body.system || `你是寶可夢對戰與培育的顧問。圖鑑資料：${JSON.stringify(body.pokemon || {})}`;\nlet sessionId = String(body.sessionId || '').trim();\nif (!sessionId) {\n  const earlier = messages.slice(0, -1);\n  if (earlier.length) {\n    system += '\\n\\n先前的對話（接著這段回答）：\\n' +\n      earlier.map((m) => `${m.role === 'user' ? '訓練家' : '顧問'}：${m.content}`).join('\\n');\n  }\n  sessionId = `once-${Date.now()}-${Math.random().toString(36).slice(2)}`;\n}\nreturn [{ json: { sessionId, system, prompt } }];\n"
       },
       "id": "8b0d2f4a-6c8e-4a1c-b3d5-7f9b1d3f5a24",
       "name": "整理對話",
@@ -81,7 +81,22 @@
       "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
       "typeVersion": 1.2,
       "position": [
-        440,
+        400,
+        240
+      ]
+    },
+    {
+      "parameters": {
+        "sessionIdType": "customKey",
+        "sessionKey": "={{ $json.sessionId }}",
+        "contextWindowLength": 12
+      },
+      "id": "c4e6a8c0-2d4f-4b6a-8e0c-2a4c6e8a0c31",
+      "name": "Simple Memory",
+      "type": "@n8n/n8n-nodes-langchain.memoryBufferWindow",
+      "typeVersion": 1.3,
+      "position": [
+        580,
         240
       ]
     },
@@ -94,7 +109,7 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        820,
+        860,
         -100
       ]
     },
@@ -108,7 +123,7 @@
       "type": "n8n-nodes-base.respondToWebhook",
       "typeVersion": 1.1,
       "position": [
-        1060,
+        1100,
         -100
       ]
     },
@@ -121,7 +136,7 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        820,
+        860,
         120
       ]
     },
@@ -137,7 +152,7 @@
       "type": "n8n-nodes-base.respondToWebhook",
       "typeVersion": 1.1,
       "position": [
-        1060,
+        1100,
         120
       ]
     }
@@ -189,6 +204,17 @@
           {
             "node": "AI Agent",
             "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Simple Memory": {
+      "ai_memory": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_memory",
             "index": 0
           }
         ]

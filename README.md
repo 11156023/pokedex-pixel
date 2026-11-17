@@ -95,15 +95,15 @@ pokedex-pixel/
 
    ```
    Webhook (POST /pokedex-chat)
-     → 組 Chat 請求   Code：網站送來的 system＋messages，加上 MODEL
-     → 呼叫模型       HTTP Request：POST …/chat/completions（Header Auth 帶金鑰）
-     → 取出回答       Code：choices[0].message.content → { ok, text }
+     → 整理對話   Code：最新一則當 prompt，前面的對話接在網站給的 system 後面
+     → AI Agent   ← OpenAI Chat Model（接你的模型）
+     → 取出回答   Code：Agent 的 output → { ok, text }
      → 回傳回答
-   呼叫模型出錯 → AI 失敗 → 回傳 502
+   AI Agent 出錯 → AI 失敗 → 回傳 502
    ```
 
-2. 「呼叫模型」節點：URL 改成你的服務（例如 `https://api.openai.com/v1/chat/completions`），Credential 新增 **Header Auth**（Name `Authorization`、Value `Bearer 你的金鑰`）
-3. 「組 Chat 請求」節點：改最上面的 `MODEL`（推理模型可以把 `REASONING_EFFORT` 填 `'low'`）
+2. 「OpenAI Chat Model」節點：Credential 新增 **OpenAI**（API Key；自架或相容 OpenAI 格式的服務，Base URL 填 `https://你的服務/v1`）
+3. 同一個節點：Model 選 **By ID** 打模型名稱（預設 `gpt-4o-mini`）；推理模型（gpt-oss、o 系列）可在 Options 加 **Reasoning Effort** = Low
 4. 右上 **Active** 打開，複製 Production URL，填進網站 `.env`：
 
    ```
@@ -112,6 +112,8 @@ pokedex-pixel/
    ```
 
 5. 重啟，「AI」燈的說明會顯示「經 n8n」
+
+網站每次都帶整段對話，所以 Agent 不用接 Memory 節點；要讓 AI 查資料、算傷害，可以在 AI Agent 底下再接 Tool 節點。
 
 網站送進 n8n 的內容：
 
@@ -127,8 +129,8 @@ pokedex-pixel/
 }
 ```
 
-n8n 要回 `{ "text": "回答" }`（`ok: false` 時網站會把 `text` 當錯誤訊息顯示）。想換成 n8n 的 AI Agent、OpenAI 節點，或在中間加記錄到 Google Sheets、通知 LINE，只要最後回傳的格式一樣就好。
-改 Code 節點的程式：改 `n8n/build-workflow.js` 的 `chatRequestCode()`／`chatReplyCode()`，再 `node n8n/build-workflow.js` 重新產生。
+n8n 要回 `{ "text": "回答" }`（`ok: false` 時網站會把 `text` 當錯誤訊息顯示）。想換別家模型節點，或在中間加記錄到 Google Sheets、通知 LINE，只要最後回傳的格式一樣就好。
+改 Code 節點的程式：改 `n8n/build-workflow.js` 的 `chatPrepareCode()`／`chatReplyCode()`，再 `node n8n/build-workflow.js` 重新產生。
 
 ## 串 n8n 圖鑑卡
 

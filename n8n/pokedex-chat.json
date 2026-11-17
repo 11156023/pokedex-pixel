@@ -1,9 +1,9 @@
 {
-  "name": "PIXEL DEX AI 建議討論（Webhook → Chat Completions）",
+  "name": "PIXEL DEX AI 建議討論（Webhook → AI Agent）",
   "nodes": [
     {
       "parameters": {
-        "content": "## PIXEL DEX × n8n：AI 建議討論\n網站 .env 設 `AI_PROVIDER=n8n` 時，圖鑑頁的「AI 建議討論」會 POST：\n`{ \"system\": \"系統提示（含 PokeAPI 資料）\", \"messages\": [{ \"role\": \"user\", \"content\": \"…\" }], \"pokemon\": {摘要} }`\n\n1. 「呼叫模型」節點：URL 改成你的服務（`…/v1/chat/completions`），\n   Credential 選 **Header Auth**（Name `Authorization`、Value `Bearer 你的金鑰`）\n2. 「組 Chat 請求」節點：改 MODEL（和 REASONING_EFFORT）\n3. 右上 **Active** 打開，Production URL 填到網站 `.env`：`N8N_CHAT_WEBHOOK_URL=`\n\n想換成 n8n 的 AI Agent／OpenAI 節點也可以，只要最後回傳 `{ \"text\": \"回答\" }`。",
+        "content": "## PIXEL DEX × n8n：AI 建議討論\n網站 .env 設 `AI_PROVIDER=n8n` 時，圖鑑頁的「AI 建議討論」會 POST：\n`{ \"system\": \"系統提示（含 PokeAPI 資料）\", \"messages\": [{ \"role\": \"user\", \"content\": \"…\" }], \"pokemon\": {摘要} }`\n\n1. 「OpenAI Chat Model」節點：Credential 選 **OpenAI**（API Key；自架／相容服務把 Base URL 填 `…/v1`）\n2. 同一個節點：Model 改成你的模型（By ID 可以直接打名字），推理模型可在 Options 設 Reasoning Effort\n3. 右上 **Active** 打開，Production URL 填到網站 `.env`：`N8N_CHAT_WEBHOOK_URL=`\n\nAI Agent 可以再接 Tool 節點（查資料、算傷害…），最後回傳 `{ \"text\": \"回答\" }` 就好。",
         "height": 340,
         "width": 460
       },
@@ -35,10 +35,10 @@
     },
     {
       "parameters": {
-        "jsCode": "// ===== 要改模型就改這兩行 =====\nconst MODEL = 'gpt-4o-mini';\nconst REASONING_EFFORT = ''; // gpt-oss／o 系列推理模型可填 'low'；一般模型留空\n\nconst body = $input.first().json.body || {};\nconst messages = (Array.isArray(body.messages) ? body.messages : [])\n  .filter((m) => m && (m.role === 'user' || m.role === 'assistant') && m.content)\n  .slice(-12);\n// body.system 是網站組好的系統提示（角色、規則、這隻寶可夢的 PokeAPI 資料）；想自己寫就改這裡\nconst system = body.system || `你是寶可夢對戰與培育的顧問。圖鑑資料：${JSON.stringify(body.pokemon || {})}`;\nconst request = { model: MODEL, messages: [{ role: 'system', content: system }, ...messages] };\nif (REASONING_EFFORT) request.reasoning_effort = REASONING_EFFORT;\nreturn [{ json: { request } }];\n"
+        "jsCode": "const body = $input.first().json.body || {};\nconst messages = (Array.isArray(body.messages) ? body.messages : [])\n  .filter((m) => m && (m.role === 'user' || m.role === 'assistant') && m.content)\n  .slice(-12);\nconst last = messages[messages.length - 1];\nconst prompt = last && last.role === 'user' ? String(last.content) : '請給這隻寶可夢的對戰建議';\n// body.system 是網站組好的系統提示（角色、規則、這隻寶可夢的 PokeAPI 資料）；想自己寫就改這裡\nlet system = body.system || `你是寶可夢對戰與培育的顧問。圖鑑資料：${JSON.stringify(body.pokemon || {})}`;\nconst earlier = messages.slice(0, -1);\nif (earlier.length) {\n  system += '\\n\\n先前的對話（接著這段回答）：\\n' +\n    earlier.map((m) => `${m.role === 'user' ? '訓練家' : '顧問'}：${m.content}`).join('\\n');\n}\nreturn [{ json: { system, prompt } }];\n"
       },
       "id": "8b0d2f4a-6c8e-4a1c-b3d5-7f9b1d3f5a24",
-      "name": "組 Chat 請求",
+      "name": "整理對話",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
@@ -48,21 +48,16 @@
     },
     {
       "parameters": {
-        "method": "POST",
-        "url": "https://api.openai.com/v1/chat/completions",
-        "authentication": "genericCredentialType",
-        "genericAuthType": "httpHeaderAuth",
-        "sendBody": true,
-        "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify($json.request) }}",
+        "promptType": "define",
+        "text": "={{ $json.prompt }}",
         "options": {
-          "timeout": 45000
+          "systemMessage": "={{ $json.system }}"
         }
       },
       "id": "3f5b7d9a-1c3e-4b5d-8f7a-9c1e3a5c7e25",
-      "name": "呼叫模型",
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.2,
+      "name": "AI Agent",
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 1.7,
       "position": [
         480,
         0
@@ -71,14 +66,35 @@
     },
     {
       "parameters": {
-        "jsCode": "const r = $input.first().json;\nconst text = String((r.choices && r.choices[0] && r.choices[0].message && r.choices[0].message.content) || '').trim();\nif (!text) return [{ json: { ok: false, source: 'n8n', text: 'AI 沒有回答（可能想太久被截斷），再問一次試試' } }];\nreturn [{ json: { ok: true, source: 'n8n', text } }];\n"
+        "model": {
+          "__rl": true,
+          "mode": "id",
+          "value": "gpt-4o-mini"
+        },
+        "options": {
+          "timeout": 45000,
+          "maxRetries": 0
+        }
+      },
+      "id": "0e2a4c6e-8b0d-4f2a-9c4e-6b8d0f2a4c30",
+      "name": "OpenAI Chat Model",
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.2,
+      "position": [
+        440,
+        240
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const r = $input.first().json;\nconst text = String(r.output || r.text || '').trim(); // AI Agent 的回答在 output\nif (!text) return [{ json: { ok: false, source: 'n8n', text: 'AI 沒有回答（可能想太久被截斷），再問一次試試' } }];\nreturn [{ json: { ok: true, source: 'n8n', text } }];\n"
       },
       "id": "5d7f9b1c-3e5a-4c7e-a9b2-1d3f5b7d9f26",
       "name": "取出回答",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        720,
+        820,
         -100
       ]
     },
@@ -92,7 +108,7 @@
       "type": "n8n-nodes-base.respondToWebhook",
       "typeVersion": 1.1,
       "position": [
-        960,
+        1060,
         -100
       ]
     },
@@ -105,7 +121,7 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        720,
+        820,
         120
       ]
     },
@@ -121,7 +137,7 @@
       "type": "n8n-nodes-base.respondToWebhook",
       "typeVersion": 1.1,
       "position": [
-        960,
+        1060,
         120
       ]
     }
@@ -131,25 +147,25 @@
       "main": [
         [
           {
-            "node": "組 Chat 請求",
+            "node": "整理對話",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "組 Chat 請求": {
+    "整理對話": {
       "main": [
         [
           {
-            "node": "呼叫模型",
+            "node": "AI Agent",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "呼叫模型": {
+    "AI Agent": {
       "main": [
         [
           {
@@ -162,6 +178,17 @@
           {
             "node": "AI 失敗",
             "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenAI Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_languageModel",
             "index": 0
           }
         ]

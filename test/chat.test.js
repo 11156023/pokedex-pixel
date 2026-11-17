@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import { chatProvider, cleanHistory, chatSystemPrompt, chat, CHAT_MAX_MESSAGES } from '../lib/integrations.js';
-import { chatRequestCode, chatReplyCode, chatErrorCode } from '../n8n/build-workflow.js';
+import { chatPrepareCode, chatReplyCode, chatErrorCode, buildChatWorkflow } from '../n8n/build-workflow.js';
 import { parseMarkdown, parseInline } from '../public/js/md.js';
 
 const KEYS = ['AI_PROVIDER', 'OPENAI_API_KEY', 'OPENAI_BASE_URL', 'OPENAI_MODEL', 'OPENAI_REASONING_EFFORT', 'N8N_CHAT_WEBHOOK_URL'];
@@ -128,19 +128,37 @@ const runNode = (fn, json) => {
   }
 };
 
-test('n8n「組 Chat 請求」：用網站給的 system，接上對話', () => {
-  const out = runNode(chatRequestCode, {
+test('n8n「整理對話」：最新一則當 prompt，前面的對話接在 system 後面', () => {
+  const one = runNode(chatPrepareCode, {
     body: { system: 'SYS', messages: [{ role: 'user', content: '對戰建議' }, { role: 'system', content: '壞人' }] },
   });
-  assert.deepEqual(out.request.messages, [{ role: 'system', content: 'SYS' }, { role: 'user', content: '對戰建議' }]);
-  assert.equal(out.request.model, 'gpt-4o-mini');
-  assert.equal('reasoning_effort' in out.request, false);
+  assert.deepEqual(one, { system: 'SYS', prompt: '對戰建議' });
+
+  const more = runNode(chatPrepareCode, {
+    body: { system: 'SYS', messages: [{ role: 'user', content: '對戰建議' }, { role: 'assistant', content: '當速攻手' }, { role: 'user', content: '帶什麼道具？' }] },
+  });
+  assert.equal(more.prompt, '帶什麼道具？');
+  assert.match(more.system, /^SYS\n\n先前的對話/);
+  assert.match(more.system, /訓練家：對戰建議\n顧問：當速攻手$/);
 });
 
-test('n8n「取出回答」與「AI 失敗」', () => {
-  assert.deepEqual(runNode(chatReplyCode, { choices: [{ message: { content: ' 當速攻手 ' } }] }), { ok: true, source: 'n8n', text: '當速攻手' });
-  assert.equal(runNode(chatReplyCode, { choices: [{ message: { content: null } }] }).ok, false);
+test('n8n「取出回答」（AI Agent 的 output）與「AI 失敗」', () => {
+  assert.deepEqual(runNode(chatReplyCode, { output: ' 當速攻手 ' }), { ok: true, source: 'n8n', text: '當速攻手' });
+  assert.equal(runNode(chatReplyCode, { output: '' }).ok, false);
   assert.match(runNode(chatErrorCode, { error: { message: '401 Unauthorized' } }).text, /401 Unauthorized/);
+});
+
+test('n8n 討論 flow：AI Agent 接 OpenAI Chat Model，錯誤走第二個出口', () => {
+  const wf = buildChatWorkflow();
+  const byName = Object.fromEntries(wf.nodes.map((n) => [n.name, n]));
+  assert.equal(byName['AI Agent'].type, '@n8n/n8n-nodes-langchain.agent');
+  assert.equal(byName['OpenAI Chat Model'].type, '@n8n/n8n-nodes-langchain.lmChatOpenAi');
+  assert.equal(wf.connections['OpenAI Chat Model'].ai_languageModel[0][0].node, 'AI Agent');
+  assert.deepEqual(wf.connections['AI Agent'].main.map((o) => o[0].node), ['取出回答', 'AI 失敗']);
+  for (const [from, out] of Object.entries(wf.connections)) { // 連線兩端都要是存在的節點
+    assert.ok(byName[from], from);
+    for (const list of Object.values(out)) for (const o of list) for (const c of o) assert.ok(byName[c.node], c.node);
+  }
 });
 
 /* ---------- 兩條路打假伺服器 ---------- */

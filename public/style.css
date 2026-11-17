@@ -344,22 +344,6 @@ kbd {
 .result mark { background: none; color: var(--accent); }
 .result .chips { display: flex; gap: 4px; }
 .results-empty { padding: 12px 14px; color: var(--muted); }
-/* AI 判斷段落 */
-.results-head {
-  margin: 8px 10px 4px;
-  padding-top: 10px;
-  border-top: 2px dashed var(--nes-gray-d);
-  font-size: 13px;
-  font-weight: 700;
-  color: var(--accent);
-}
-.results-head:first-child { margin-top: 0; padding-top: 0; border-top: 0; }
-.results-wait::after { content: '▮'; margin-left: 4px; animation: blink 0.6s steps(1) infinite; }
-.results-error { color: var(--nes-red); }
-.result-ai .nm small { color: var(--accent); }
-.result-local .nm small { color: var(--muted); }
-.results-small { padding: 0 14px 6px; font-size: 13px; }
-.result-trigger { grid-template-columns: 16px minmax(0, 1fr); min-height: 40px; color: var(--accent); }
 
 /* ---------- 屬性徽章 ---------- */
 .chip {
@@ -546,7 +530,94 @@ kbd {
 
 .forms { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 18px; padding-top: 16px; border-top: 2px solid var(--sub); }
 
-/* ---------- 串接（整排；.env 決定 OpenAI 或 n8n） ---------- */
+/* ---------- AI 建議討論（整排；.env 的 AI_PROVIDER） ---------- */
+.chat-log {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-height: 440px;
+  margin-bottom: 14px;
+  padding-right: 4px;
+  overflow-y: auto;
+  scrollbar-color: var(--nes-gray-d) var(--nes-black);
+}
+/* AI 靠左（左邊一條亮色），你靠右（較暗）；不另外標名字 */
+.chat-msg {
+  max-width: 85%;
+  margin: 0;
+  padding: 10px 14px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 16px;
+  line-height: 1.75;
+}
+.chat-ai { align-self: flex-start; background: var(--sub-bg); box-shadow: inset 4px 0 0 var(--accent), inset 0 0 0 2px var(--sub); padding-left: 18px; white-space: normal; }
+.chat-user { align-self: flex-end; background: var(--nes-black); box-shadow: inset 0 0 0 2px var(--nes-gray-d); color: var(--muted); }
+.chat-wait::after { content: '▮'; animation: blink 0.6s steps(1) infinite; }
+.chat-quick { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
+
+/* 標題列：右邊放不搶眼的「↺ 清除」「⛶ 全螢幕」 */
+.chat-head { display: flex; align-items: baseline; gap: 12px; margin-bottom: 16px; }
+.chat-head .sec-title { margin: 0; min-width: 0; }
+.chat-tools { display: flex; gap: 6px; margin-left: auto; flex-shrink: 0; }
+.chat-tool {
+  padding: 2px 4px;
+  border: 0;
+  background: none;
+  color: var(--nes-gray-d);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+.chat-tool:hover, .chat-tool:focus-visible { color: var(--accent); outline: none; }
+.chat-tool:disabled { visibility: hidden; }
+
+/* 全螢幕：蓋住整頁，對話框撐滿中間，內容最寬 860px 置中 */
+body.chat-open { overflow: hidden; }
+.chat.chat-full {
+  position: fixed;
+  inset: 0;
+  z-index: 1000; /* 蓋過頁首（100）和搜尋下拉（150），Toast（2000）還是在最上面 */
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  height: 100dvh;
+  padding: 20px max(16px, calc((100vw - 860px) / 2)) 16px;
+  border: 0;
+  background: var(--nes-black);
+  color: var(--ink); /* 圖層在 body 底下，不在圖鑑窗裡，要自己設字色 */
+  box-shadow: inset 0 4px 0 var(--accent);
+}
+.chat-full .chat-head { padding-bottom: 14px; border-bottom: 2px solid var(--sub); }
+.chat-full .chat-log { flex: 1; min-height: 0; max-height: none; }
+.chat-full .chat-tool { font-size: 14px; }
+
+/* AI 回答的 Markdown */
+.md > :first-child { margin-top: 0; }
+.md > :last-child { margin-bottom: 0; }
+.md p, .md ul, .md ol, .md pre, .md blockquote, .md .md-table { margin: 0 0 10px; }
+.md h4, .md h5, .md h6 { margin: 14px 0 6px; color: var(--accent); font-size: 16px; }
+.md ul, .md ol { padding-left: 1.4em; }
+.md li + li { margin-top: 2px; }
+.md li > ul, .md li > ol { margin: 2px 0 0; }
+.md ul { list-style: none; }
+.md ul > li::before { content: '▪'; display: inline-block; width: 1.1em; margin-left: -1.1em; color: var(--accent); }
+.md ol > li::marker { color: var(--accent); }
+.md strong { color: var(--accent); font-weight: normal; } /* 像素字體加粗會糊，改用顏色強調 */
+.md em { font-style: normal; color: var(--focus); }
+.md code { padding: 0 4px; background: var(--sub); font-size: 0.92em; }
+.md pre { padding: 10px 12px; background: var(--nes-black); overflow-x: auto; white-space: pre; }
+.md pre code { padding: 0; background: none; }
+.md blockquote { padding-left: 12px; box-shadow: inset 3px 0 0 var(--nes-gray-d); color: var(--muted); }
+.md hr { margin: 12px 0; border: 0; border-top: 2px dashed var(--sub); }
+.md a { color: var(--accent); }
+.md .md-table { overflow-x: auto; }
+.md table { border-collapse: collapse; font-size: 15px; }
+.md th, .md td { padding: 4px 10px; border: 2px solid var(--sub); text-align: left; vertical-align: top; }
+.md th { color: var(--accent); font-weight: normal; }
+@media (max-width: 560px) { .chat-msg { max-width: 92%; } }
+
+/* ---------- n8n 圖鑑卡（整排） ---------- */
 .ask-row { display: flex; gap: 10px; align-items: stretch; flex-wrap: wrap; }
 .ask-row input {
   flex: 1 1 260px;
@@ -663,7 +734,6 @@ kbd {
   .result img { width: 40px; height: 40px; }
   .result .no { display: none; }
   .result .nm small { display: block; margin-left: 0; font-size: 12px; line-height: 1.2; }
-  .result-trigger { grid-template-columns: 12px minmax(0, 1fr); }
 
   .name-zh { font-size: 26px; }
   .facts { grid-template-columns: repeat(2, minmax(0, 1fr)); }

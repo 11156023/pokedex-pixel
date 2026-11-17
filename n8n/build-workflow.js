@@ -42,7 +42,7 @@ export function cardCode() {
     `種族值：${stats.map((st) => `${st.label} ${st.value}`).join('／')}（總和 ${total}）`,
     `最突出：${best.label} ${best.value}，偏${role}`,
     flavor ? `圖鑑：${flavor}` : '',
-    body.message ? `你說：「${body.message}」——收到！（可以在這裡接 OpenAI、LINE、Google Sheets 節點）` : '',
+    body.message ? `你說：「${body.message}」——收到！（可以在這裡接 LINE、Google Sheets 節點）` : '',
     '—— 這段由 n8n 工作流產生',
   ].filter(Boolean);
 
@@ -62,11 +62,41 @@ export function notFoundCode() {
   const name = body.name || body.id || (req.query && req.query.name) || '';
   return [{ json: { ok: false, source: 'n8n', text: `n8n 在 PokeAPI 找不到「${name}」` } }];
 }
+
+/* ---------- AI 建議討論 flow（AI_PROVIDER=n8n 時網站把對話送來這裡） ---------- */
+export function chatRequestCode() {
+  // ===== 要改模型就改這兩行 =====
+  const MODEL = 'gpt-4o-mini';
+  const REASONING_EFFORT = ''; // gpt-oss／o 系列推理模型可填 'low'；一般模型留空
+
+  const body = $input.first().json.body || {};
+  const messages = (Array.isArray(body.messages) ? body.messages : [])
+    .filter((m) => m && (m.role === 'user' || m.role === 'assistant') && m.content)
+    .slice(-12);
+  // body.system 是網站組好的系統提示（角色、規則、這隻寶可夢的 PokeAPI 資料）；想自己寫就改這裡
+  const system = body.system || `你是寶可夢對戰與培育的顧問。圖鑑資料：${JSON.stringify(body.pokemon || {})}`;
+  const request = { model: MODEL, messages: [{ role: 'system', content: system }, ...messages] };
+  if (REASONING_EFFORT) request.reasoning_effort = REASONING_EFFORT;
+  return [{ json: { request } }];
+}
+
+export function chatReplyCode() {
+  const r = $input.first().json;
+  const text = String((r.choices && r.choices[0] && r.choices[0].message && r.choices[0].message.content) || '').trim();
+  if (!text) return [{ json: { ok: false, source: 'n8n', text: 'AI 沒有回答（可能想太久被截斷），再問一次試試' } }];
+  return [{ json: { ok: true, source: 'n8n', text } }];
+}
+
+export function chatErrorCode() {
+  const e = $input.first().json;
+  const msg = (e.error && (e.error.message || e.error.description)) || e.message || JSON.stringify(e).slice(0, 200);
+  return [{ json: { ok: false, source: 'n8n', text: `n8n 呼叫 AI 失敗：${msg}` } }];
+}
 /* eslint-enable no-undef */
 
 /** 取出函式本體當 Code 節點的 jsCode（去掉外層 function 與縮排） */
 export function fnBody(fn) {
-  const src = fn.toString();
+  const src = fn.toString().replace(/\r\n/g, '\n'); // Windows 簽出是 CRLF，產出統一用 LF
   const inner = src.slice(src.indexOf('{') + 1, src.lastIndexOf('}'));
   return inner.replace(/^\n/, '').replace(/^ {2}/gm, '').trimEnd() + '\n';
 }
@@ -79,7 +109,7 @@ const NOTE = `## PIXEL DEX × n8n
 2. 或按 Webhook 的 **Listen for test event** → 用 Test URL（/webhook-test/pokedex，一次有效）
 3. 網址填到網頁專案的 \`.env\`：\`N8N_WEBHOOK_URL=\`
 
-想加 AI：在「組合圖鑑卡」後面接 OpenAI 節點，再把結果放進回傳的 \`text\`。`;
+要讓 AI 跟使用者討論這隻寶可夢：另外匯入 \`pokedex-chat.json\`（AI 建議討論）。`;
 
 export function buildWorkflow() {
   const http = (id, name, url, position) => ({
@@ -161,8 +191,99 @@ export function buildWorkflow() {
   };
 }
 
+const CHAT_NOTE = `## PIXEL DEX × n8n：AI 建議討論
+網站 .env 設 \`AI_PROVIDER=n8n\` 時，圖鑑頁的「AI 建議討論」會 POST：
+\`{ "system": "系統提示（含 PokeAPI 資料）", "messages": [{ "role": "user", "content": "…" }], "pokemon": {摘要} }\`
+
+1. 「呼叫模型」節點：URL 改成你的服務（\`…/v1/chat/completions\`），
+   Credential 選 **Header Auth**（Name \`Authorization\`、Value \`Bearer 你的金鑰\`）
+2. 「組 Chat 請求」節點：改 MODEL（和 REASONING_EFFORT）
+3. 右上 **Active** 打開，Production URL 填到網站 \`.env\`：\`N8N_CHAT_WEBHOOK_URL=\`
+
+想換成 n8n 的 AI Agent／OpenAI 節點也可以，只要最後回傳 \`{ "text": "回答" }\`。`;
+
+export function buildChatWorkflow() {
+  const code = (id, name, fn, position) => ({
+    parameters: { jsCode: fnBody(fn) },
+    id,
+    name,
+    type: 'n8n-nodes-base.code',
+    typeVersion: 2,
+    position,
+  });
+  const respond = (id, name, position, options = {}) => ({
+    parameters: { respondWith: 'firstIncomingItem', options },
+    id,
+    name,
+    type: 'n8n-nodes-base.respondToWebhook',
+    typeVersion: 1.1,
+    position,
+  });
+  const link = (node) => [{ node, type: 'main', index: 0 }];
+
+  return {
+    name: 'PIXEL DEX AI 建議討論（Webhook → Chat Completions）',
+    nodes: [
+      {
+        parameters: { content: CHAT_NOTE, height: 340, width: 460 },
+        id: '6a1e3c5b-7d9f-4b2a-8c4e-0f6b8d2a4c21',
+        name: '說明',
+        type: 'n8n-nodes-base.stickyNote',
+        typeVersion: 1,
+        position: [-80, -400],
+      },
+      {
+        parameters: { httpMethod: 'POST', path: 'pokedex-chat', responseMode: 'responseNode', options: {} },
+        id: '1c3e5a7b-9d2f-4e6a-b8c1-3d5f7a9b1c22',
+        name: 'Webhook',
+        type: 'n8n-nodes-base.webhook',
+        typeVersion: 2,
+        position: [0, 0],
+        webhookId: '4e6a8c0b-2d4f-4a6c-9e1b-5f7d9b1d3e23',
+      },
+      code('8b0d2f4a-6c8e-4a1c-b3d5-7f9b1d3f5a24', '組 Chat 請求', chatRequestCode, [240, 0]),
+      {
+        parameters: {
+          method: 'POST',
+          url: 'https://api.openai.com/v1/chat/completions',
+          authentication: 'genericCredentialType',
+          genericAuthType: 'httpHeaderAuth',
+          sendBody: true,
+          specifyBody: 'json',
+          jsonBody: '={{ JSON.stringify($json.request) }}',
+          options: { timeout: 45000 },
+        },
+        id: '3f5b7d9a-1c3e-4b5d-8f7a-9c1e3a5c7e25',
+        name: '呼叫模型',
+        type: 'n8n-nodes-base.httpRequest',
+        typeVersion: 4.2,
+        position: [480, 0],
+        onError: 'continueErrorOutput',
+      },
+      code('5d7f9b1c-3e5a-4c7e-a9b2-1d3f5b7d9f26', '取出回答', chatReplyCode, [720, -100]),
+      respond('7f9b1d3e-5a7c-4e9a-b1c3-3f5d7f9b1a27', '回傳回答', [960, -100]),
+      code('9b1d3f5a-7c9e-4a1b-83d5-5a7c9e1b3d28', 'AI 失敗', chatErrorCode, [720, 120]),
+      respond('2a4c6e8b-0d2f-4c4e-a6b8-7c9e1a3c5e29', '回傳 502', [960, 120], { responseCode: 502 }),
+    ],
+    connections: {
+      Webhook: { main: [link('組 Chat 請求')] },
+      '組 Chat 請求': { main: [link('呼叫模型')] },
+      呼叫模型: { main: [link('取出回答'), link('AI 失敗')] },
+      取出回答: { main: [link('回傳回答')] },
+      'AI 失敗': { main: [link('回傳 502')] },
+    },
+    active: false,
+    settings: { executionOrder: 'v1' },
+    pinData: {},
+    tags: [],
+  };
+}
+
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  const out = path.join(path.dirname(fileURLToPath(import.meta.url)), 'pokedex-webhook.json');
-  writeFileSync(out, JSON.stringify(buildWorkflow(), null, 2) + '\n');
-  console.log('已輸出', out);
+  const dir = path.dirname(fileURLToPath(import.meta.url));
+  for (const [file, wf] of [['pokedex-webhook.json', buildWorkflow()], ['pokedex-chat.json', buildChatWorkflow()]]) {
+    const out = path.join(dir, file);
+    writeFileSync(out, JSON.stringify(wf, null, 2) + '\n');
+    console.log('已輸出', out);
+  }
 }

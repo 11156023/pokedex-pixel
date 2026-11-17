@@ -1,12 +1,13 @@
 # PIXEL DEX 像素圖鑑
 
 紅白機像素風的寶可夢資料查詢網頁。Node.js（Express）跑在 port 3000，資料來自 [PokeAPI](https://pokeapi.co/)；
-另外留好兩個串接口：**OpenAI**（AI 解說）與 **n8n Webhook**（附一份可直接匯入的 n8n flow），用哪一個由 `.env` 決定，網頁上沒有切換或設定畫面。
+另外留好兩個串接口：**OpenAI**（名稱比對不到時交給 AI 判斷）與 **n8n Webhook**（附一份可直接匯入的 n8n flow），有沒有開由 `.env` 決定，網頁上沒有切換或設定畫面。
 
 ## 功能
 
 - **模糊搜尋**：中文（繁／簡）、英文、日文（平假名也行）、編號都能查，打錯字也找得到
   `picachu`、`pikachuu`、`妙娃種子`、`耿龜`、`ぴかちゅう`、`#25`、`025` 都會找到正確的那隻
+- **AI 判斷**（要填 OpenAI 金鑰）：名稱比對不到的描述交給 AI 猜，例如 `黃色老鼠` → 皮卡丘、`背上有花的青蛙` → 妙蛙花
 - **圖鑑畫面**：點陣圖（一般／色違／背面／初代紅綠版／原畫，只做整數倍放大）、叫聲、屬性、身高體重、性別比例、世代、捕獲率、蛋群、特性（含隱藏特性與說明）
 - **種族值** 6 項與總和、**屬性相性**（×4／×2／×½／×¼／×0）、**圖鑑說明**（打字機效果）、**進化鏈**（含進化條件，伊布這種分支也支援）、**形態**（超級進化、地區形態、超極巨化）
 - 手機／桌機 RWD；快捷鍵 `/` 搜尋、`←` `→` 上／下一隻、`R` 隨機
@@ -40,14 +41,15 @@ pokedex-pixel/
 │   ├─ pokeapi.js          名稱索引（GraphQL）、單隻資料（REST）、快取、整理成前端要的格式
 │   ├─ fuzzy.js            模糊比對（完全 > 開頭 > 包含 > 打錯字 > 依序出現）
 │   ├─ typechart.js        18 屬性中文名、NES 色票、相剋表
-│   └─ integrations.js     OpenAI（Chat Completions）、n8n Webhook
+│   ├─ describe.js         AI 判斷搜尋的本機篩候選（顏色／屬性／分類／名字計分）
+│   └─ integrations.js     AI 判斷搜尋（OpenAI Chat Completions）、n8n Webhook
 ├─ public/                 前端（純 HTML/CSS/JS，不用打包）
 │   ├─ index.html、style.css
 │   └─ js/ui.js（共用元件：toast、狀態畫面、面板格子、分段按鈕、打字機）、js/app.js
 ├─ n8n/
 │   ├─ pokedex-webhook.json   ← 匯入 n8n 用的 flow
 │   └─ build-workflow.js      產生上面那個 JSON（Code 節點的程式寫在這裡）
-├─ test/fuzzy.test.js      npm test
+├─ test/                   npm test（fuzzy.test.js 模糊比對、ai.test.js 解析 AI 回覆）
 └─ .env.example            複製成 .env 填 OpenAI / n8n
 ```
 
@@ -55,33 +57,48 @@ pokedex-pixel/
 
 | 方法 | 路徑 | 說明 |
 |---|---|---|
-| GET | `/api/status` | 名稱索引狀態、目前啟用的串接（`ask`: `openai`／`n8n`／`null`） |
+| GET | `/api/status` | 名稱索引狀態、`aiSearch`（AI 判斷有沒有開）、`model`、`n8n`（有沒有填 webhook） |
 | GET | `/api/search?q=皮卡&limit=12` | 模糊搜尋，回傳排序好的清單（含 `score`） |
+| GET | `/api/ai-search?q=綠色青蛙` | 本機篩候選後交給 AI 挑，固定回傳前 15 名（`reason`；`source`: `ai`／`local` 補位）、`candidates`（篩出幾隻）、`aiError`（AI 沒回應時的原因）；沒填 OpenAI 金鑰回 503 |
 | GET | `/api/pokemon/:key` | 單隻完整資料；`key` 可以是編號、英文 slug 或任何模糊字串（會回 `resolvedFrom`） |
 | GET | `/api/random` | 隨機一個編號 |
-| POST | `/api/ask` | `{ "id": 25, "text": "牠怕什麼？" }` → `{ text }`；依 `.env` 轉給 OpenAI 或 n8n |
+| POST | `/api/ask` | `{ "id": 25, "text": "附帶訊息" }` → `{ text }`；轉給 n8n Webhook |
 
-`/api/ask` 每 IP 每分鐘 10 次（避免外流的網址被拿去刷 API key）。
+限流（每 IP 每分鐘）：`/api/ai-search` 20 次、`/api/ask` 10 次，避免外流的網址被拿去刷 API key。
 
-## 串接用哪一個：`.env` 決定
-
-| `ASK_PROVIDER` | 結果 |
-|---|---|
-| 留空（預設） | 有 `OPENAI_API_KEY` 用 OpenAI；否則有 `N8N_WEBHOOK_URL` 用 n8n；都沒有就不顯示串接區 |
-| `openai` | 只用 OpenAI（沒填金鑰就不顯示） |
-| `n8n` | 只用 n8n（沒填網址就不顯示） |
-| `off` | 關掉串接區 |
-
-網頁不提供切換或設定畫面；改 `.env` 後重啟伺服器即可。右上角會多一顆燈顯示目前用的是 OpenAI 還是 n8n。
-
-## 串 OpenAI
+## AI 判斷搜尋（OpenAI）
 
 1. 複製 `.env.example` 成 `.env`
-2. 填 `OPENAI_API_KEY=sk-...`（模型預設 `gpt-4o-mini`，可用 `OPENAI_MODEL` 換）
-3. 重啟 `npm start`，網頁下方出現「AI 解說」區塊
+2. 填 `OPENAI_API_KEY=sk-...`（模型預設 `gpt-4o-mini`，可用 `OPENAI_MODEL` 換；走相容 OpenAI 格式的代理或本機模型時改 `OPENAI_BASE_URL`）
+3. 重啟 `npm start`，右上角多一顆「AI」燈，搜尋框提示變成「名稱、編號，或描述」
 
-送出去的只有這隻寶可夢的摘要（名稱、屬性、種族值、特性、弱點、圖鑑說明、進化），不會送整包資料。
-金鑰只放在伺服器端，瀏覽器看不到。
+什麼時候會問 AI：
+
+| 情況 | 行為 |
+|---|---|
+| 名稱比對沒結果，或最好的分數低於 700（只是字元零星相符，例如 `老鼠` → 地鼠） | 停止打字 0.6 秒後**自動**送 AI，結果顯示在下拉的「✦ AI 判斷」段落 |
+| 名稱比對有像樣的結果（例如 `黃色` → 小隕星（黃色核心）） | 不自動送；下拉最後一列「✦ 交給 AI 判斷」可以手動送 |
+| 名字完全打對、編號、只打 1 個中文字或 2 個英文字母、注音還在選字 | 不送 |
+| 按 Enter 時名稱找不到 | 不等 0.6 秒，馬上送 |
+
+怎麼判斷（[lib/describe.js](lib/describe.js)）：
+
+```
+「綠色青蛙」
+  1. 本機篩候選：從描述抓出顏色（綠／黃／紅…，PokeAPI 的 10 種圖鑑顏色）、屬性（草／火／電…）、
+     剩下的字（青、蛙），在 1025 隻裡計分：顏色 +3、每個屬性 +2、字出現在分類（「青蛙寶可夢」）+2、出現在名字 +1
+     → 取前 60 隻，例如 蚊香蛙皇、電肚蛙、妙蛙種子、妙蛙草、妙蛙花…
+  2. 交給 AI 挑：把這 60 行「編號 名稱|顏色|屬性|分類」連同描述送給 AI，請它挑出前 5 名並給理由（`AI_PICKS`；叫它挑 15 隻回覆太長，常超過 20 秒、後半段也容易亂掉）
+     （清單外確定更符合的也可以列；什麼都篩不到時就讓 AI 自己判斷）
+  3. 對照圖鑑：AI 回的名字／編號再對一次索引，索引裡沒有的（AI 亂編的）直接丟掉
+  4. 固定輸出前 15 名（`lib/integrations.js` 的 `AI_TOP_N`）：AI 挑的排前面，其餘用第 1 步的候選依分數補滿（理由顯示比對到什麼，例如「綠色・分類有蛙」）；
+     AI 20 秒沒回應或出錯，就直接列候選前 15 名，下拉會註明「AI 沒回應」
+```
+
+整份 1025 隻直接給 AI 要 ~1.7 萬 token、30 秒以上；先篩成 60 隻只要 ~1200 token。
+同一個描述 24 小時內不重複問。送出去的只有搜尋框打的字和候選清單，金鑰只放在伺服器端，瀏覽器看不到。
+
+用 gpt-oss、o 系列這類推理模型時，可以在 `.env` 加 `OPENAI_REASONING_EFFORT=low` 讓它少想一點、回得快一點（一般模型不要填，會被拒絕）。
 
 ## 串 n8n
 
@@ -128,7 +145,7 @@ n8n 回傳（網頁只顯示 `text`；`card` 是給其他節點或程式用的�
 N8N_WEBHOOK_URL=http://localhost:5678/webhook/pokedex
 ```
 
-同時有 OpenAI 金鑰的話，再加一行 `ASK_PROVIDER=n8n`。重啟後網頁下方出現「n8n」區塊，按「送出」就會打到這個 webhook，畫面顯示回傳的 `text`。
+重啟後網頁下方出現「n8n」區塊，按「送出」就會打到這個 webhook，畫面顯示回傳的 `text`。（跟 AI 判斷搜尋互不影響，可以同時開。）
 
 不經網頁直接測 flow（PowerShell）：
 

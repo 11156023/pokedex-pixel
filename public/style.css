@@ -344,6 +344,22 @@ kbd {
 .result mark { background: none; color: var(--accent); }
 .result .chips { display: flex; gap: 4px; }
 .results-empty { padding: 12px 14px; color: var(--muted); }
+/* AI 判斷段落 */
+.results-head {
+  margin: 8px 10px 4px;
+  padding-top: 10px;
+  border-top: 2px dashed var(--nes-gray-d);
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--accent);
+}
+.results-head:first-child { margin-top: 0; padding-top: 0; border-top: 0; }
+.results-wait::after { content: '▮'; margin-left: 4px; animation: blink 0.6s steps(1) infinite; }
+.results-error { color: var(--nes-red); }
+.result-ai .nm small { color: var(--accent); }
+.result-local .nm small { color: var(--muted); }
+.results-small { padding: 0 14px 6px; font-size: 13px; }
+.result-trigger { grid-template-columns: 16px minmax(0, 1fr); min-height: 40px; color: var(--accent); }
 
 /* ---------- 屬性徽章 ---------- */
 .chip {
@@ -647,6 +663,7 @@ kbd {
   .result img { width: 40px; height: 40px; }
   .result .no { display: none; }
   .result .nm small { display: block; margin-left: 0; font-size: 12px; line-height: 1.2; }
+  .result-trigger { grid-template-columns: 12px minmax(0, 1fr); }
 
   .name-zh { font-size: 26px; }
   .facts { grid-template-columns: repeat(2, minmax(0, 1fr)); }

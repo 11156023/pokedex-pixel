@@ -4,13 +4,12 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { search, getPokemon, randomId, ensureIndex, indexStatus, summarize, HttpError } from './lib/pokeapi.js';
 import { integrationStatus, chat, callN8n } from './lib/integrations.js';
+import { loadEnv } from './lib/env.js';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
-try {
-  process.loadEnvFile(path.join(ROOT, '.env')); // Node 20.12+ 內建，不需要 dotenv；lib 都是呼叫時才讀 env
-} catch {
-  /* 沒有 .env 也能跑：只是 OpenAI / n8n 會顯示未設定 */
-}
+// 沒有 .env 也能跑（只是 AI／n8n 未啟用）；lib 都是呼叫時才讀 env，所以這裡載入就好
+const envFile = path.join(ROOT, '.env');
+const envResult = loadEnv(envFile);
 
 const app = express();
 const argPort = process.argv.indexOf('--port');
@@ -78,13 +77,31 @@ app.use((err, req, res, next) => {
 
 const server = app.listen(PORT, () => {
   console.log(`▶ POKéDEX PIXEL 已啟動：http://localhost:${PORT}`);
+  const envLabel = {
+    builtin: `已讀取 ${envFile}`,
+    fallback: `已讀取 ${envFile}（Node ${process.versions.node} 沒有內建 loadEnvFile，用備援方式讀）`,
+    missing: `找不到 ${envFile}（照 .env.example 複製一份再填）`,
+    error: `讀取 ${envFile} 失敗：${envResult.error}`,
+  }[envResult.how];
+  console.log(`  設定檔：${envLabel}`);
   ensureIndex()
     .then((idx) => console.log(`  名稱索引就緒：${idx.entries.length} 筆（來源 ${idx.source}）`))
     .catch((err) => console.warn('  名稱索引暫時載入失敗，第一次搜尋時會再試：', err.message));
   const st = integrationStatus();
-  const chatLabel = { openai: `OpenAI（${st.model}）`, n8n: 'n8n Webhook' }[st.chat] || '未啟用（見 .env.example 的 AI_PROVIDER）';
+  const want = (process.env.AI_PROVIDER || '').trim().toLowerCase();
+  const why =
+    want === 'off' ? 'AI_PROVIDER=off'
+    : want === 'n8n' ? 'AI_PROVIDER=n8n 但 N8N_CHAT_WEBHOOK_URL 是空的'
+    : want === 'openai' ? 'AI_PROVIDER=openai 但 OPENAI_API_KEY 是空的'
+    : '.env 的 OPENAI_API_KEY 和 N8N_CHAT_WEBHOOK_URL 都沒填';
+  const chatLabel = { openai: `OpenAI（${st.model}）`, n8n: `n8n（${process.env.N8N_CHAT_WEBHOOK_URL.trim()}）` }[st.chat] || `未啟用（${why}）`;
   console.log(`  AI 建議討論：${chatLabel}`);
-  if (st.n8n) console.log('  n8n 圖鑑卡：啟用');
+  if (st.n8n) console.log(`  n8n 圖鑑卡：啟用（${process.env.N8N_WEBHOOK_URL.trim()}）`);
+  for (const k of ['N8N_CHAT_WEBHOOK_URL', 'N8N_WEBHOOK_URL']) {
+    if ((process.env[k] || '').includes('/webhook-test/')) {
+      console.warn(`  ⚠ ${k} 是測試網址（/webhook-test/）：n8n 要先按「Listen for test event」，而且只收一次。正式用請把 workflow 設成 Active，改用 /webhook/`);
+    }
+  }
 });
 
 server.on('error', (err) => {
